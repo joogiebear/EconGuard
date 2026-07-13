@@ -1,0 +1,18 @@
+name: EconGuard
+version: ${version}
+main: com.mystipixel.econguard.EconGuardPlugin
+api-version: '1.21'
+author: Mystipixel
+description: Shared economy audit ledger and anti-abuse / RMT detection core.
+commands:
+  econguard:
+    description: EconGuard anti-abuse admin tools.
+    usage: /econguard <flags|history|stats|reload>
+    aliases: [eg, econ]
+permissions:
+  econguard.admin:
+    description: Use EconGuard admin commands.
+    default: op
+  econguard.alerts:
+    description: Receive anti-abuse alerts and flag notifications in chat.
+    default: op

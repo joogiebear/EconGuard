@@ -1,0 +1,47 @@
+# EconGuard - shared economy audit + anti-abuse / RMT detection core.
+#
+# Other plugins (RoyalBank, an auction house, a /pay bridge, shops) report every money movement here.
+# EconGuard keeps a single unified ledger and runs cross-flow anti-abuse analysis on top of it.
+# It cannot prevent real-money trading (that is an out-of-game agreement) - it surfaces suspicious
+# patterns for staff to review, and gives you one audit trail for bans/rollbacks.
+
+# Currency symbol used only for formatting alert/console messages.
+currency-symbol: "$"
+
+# Notify online players with econguard.alerts when an alert or flag fires.
+notify-staff: true
+
+# Optional Discord webhook for alerts and flags. Leave blank to disable.
+discord-webhook: ""
+
+database:
+  file: "econguard.db"
+  # Keep at most this many ledger rows per player (pruned on startup). 0 = unlimited.
+  max-rows-per-player: 500
+
+# "Young account" definition. The velocity and large-incoming signals only flag young accounts,
+# so a veteran who legitimately sells a lucky drop is NOT flagged - only wealth that arrives with
+# little to no time invested (the real RMT fingerprint).
+young-account:
+  max-age-days: 3          # account first joined within this many days counts as young
+  max-playtime-hours: 10   # OR online playtime below this many hours counts as young
+
+detection:
+  # A single transaction at/above this magnitude is logged as a large-transaction alert.
+  large-transaction: 100000000.0
+
+  # A young account receiving a single incoming transfer (pay / auction sale) at/above this is flagged.
+  young-incoming-transfer: 50000000.0
+
+  # Velocity: a YOUNG account gaining at/above this much (incoming) within the window is flagged.
+  velocity:
+    enabled: true
+    window-minutes: 30
+    threshold: 250000000.0
+
+  # Counterparty correlation: if the same payer funds the same receiver at/above this total within the
+  # window, both are flagged for collusion (catches RMT rings regardless of account age). 0 = off.
+  counterparty:
+    enabled: true
+    window-minutes: 60
+    threshold: 500000000.0
