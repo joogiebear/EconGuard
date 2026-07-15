@@ -14,8 +14,21 @@ notify-staff: true
 # Optional Discord webhook for alerts and flags. Leave blank to disable.
 discord-webhook: ""
 
+# Storage backend. SQLITE (default, single server) or MYSQL (a shared audit DB across servers -
+# the recommended setup for a network, so every server reports into one ledger).
+storage:
+  type: SQLITE
+  sqlite-file: "econguard.db"
+  mysql:
+    host: localhost
+    port: 3306
+    database: econguard
+    username: root
+    password: ""
+    properties: "useSSL=false&allowPublicKeyRetrieval=true"
+    pool-size: 10
+
 database:
-  file: "econguard.db"
   # Keep at most this many ledger rows per player (pruned on startup). 0 = unlimited.
   max-rows-per-player: 500
 

@@ -2,11 +2,13 @@ package com.mystipixel.econguard.data;
 
 import com.mystipixel.econguard.api.Flag;
 import com.mystipixel.econguard.api.MoneyEvent;
+import com.zaxxer.hikari.HikariConfig;
+import com.zaxxer.hikari.HikariDataSource;
+import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.plugin.java.JavaPlugin;
 
 import java.io.File;
 import java.sql.Connection;
-import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
@@ -14,113 +16,187 @@ import java.sql.Statement;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Queue;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.logging.Level;
 
 /**
- * Unified SQLite ledger plus the persisted flag registry.
+ * Unified ledger plus the persisted flag registry, over one HikariCP data source that serves both
+ * SQLite (default, single server) and MySQL (networks / a shared audit DB across servers).
  *
- * Audit rows are append-only, so {@link #record} just enqueues and a background {@link #flush} batches
- * the inserts on a dedicated write connection — keeping high-volume audit writes off the main thread.
- * The flag table and all reads use a separate main-thread connection. WAL + busy_timeout make the two
- * connections to the same file safe; pruning uses a third short-lived connection.
+ * <p>Audit rows are append-only, so {@link #record} just enqueues and a background {@link #flush}
+ * batches the inserts — keeping high-volume audit writes off the main thread. The JDBC driver and the
+ * connection pool are delivered by Paper's library loader (see plugin.yml {@code libraries}); nothing
+ * is shaded into the jar.
  */
 public final class Ledger {
+
+    public enum Type { SQLITE, MYSQL }
+
+    private static final int FLUSH_BATCH_CAP = 2000;
     private static final String INSERT_SQL = """
             INSERT INTO ledger (uuid, username, source, action, amount, incoming,
                                 counterparty, counterparty_name, item, balance_after, note, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """;
-    private static final int FLUSH_BATCH_CAP = 2000;
 
     private record Queued(MoneyEvent event, long time) {
     }
 
     private final JavaPlugin plugin;
     private final Queue<Queued> writeQueue = new ConcurrentLinkedQueue<>();
-    private Connection connection;       // main thread: flags + reads + DDL
-    private Connection writeConnection;   // background flush: ledger inserts only
-    private String jdbcUrl;
+
+    private Type type;
+    private HikariDataSource dataSource;
 
     public Ledger(JavaPlugin plugin) {
         this.plugin = plugin;
     }
 
+    // ------------------------------------------------------------------ lifecycle
+
     public boolean connect() {
         try {
-            File dataFolder = plugin.getDataFolder();
-            if (!dataFolder.exists() && !dataFolder.mkdirs()) {
-                plugin.getLogger().severe("Could not create data folder: " + dataFolder.getAbsolutePath());
-                return false;
+            ConfigurationSection storage = plugin.getConfig().getConfigurationSection("storage");
+            if (storage == null) {
+                storage = plugin.getConfig().createSection("storage");
             }
-            String fileName = plugin.getConfig().getString("database.file", "econguard.db");
-            File file = new File(dataFolder, fileName);
-            Class.forName("org.sqlite.JDBC");
-            jdbcUrl = "jdbc:sqlite:" + file.getAbsolutePath();
-            connection = open();
+            String rawType = storage.getString("type", "SQLITE").toUpperCase(Locale.ROOT);
+            this.type = "MYSQL".equals(rawType) ? Type.MYSQL : Type.SQLITE;
+
+            HikariConfig hikari = new HikariConfig();
+            hikari.setPoolName("EconGuard");
+
+            if (type == Type.MYSQL) {
+                ConfigurationSection my = storage.getConfigurationSection("mysql");
+                if (my == null) {
+                    my = storage.createSection("mysql");
+                }
+                String host = my.getString("host", "localhost");
+                int port = my.getInt("port", 3306);
+                String database = my.getString("database", "econguard");
+                String props = my.getString("properties", "useSSL=false");
+                loadDriver("com.mysql.cj.jdbc.Driver");
+                hikari.setJdbcUrl("jdbc:mysql://" + host + ":" + port + "/" + database + "?" + props);
+                hikari.setDriverClassName("com.mysql.cj.jdbc.Driver");
+                hikari.setUsername(my.getString("username", "root"));
+                hikari.setPassword(my.getString("password", ""));
+                hikari.setMaximumPoolSize(Math.max(1, my.getInt("pool-size", 10)));
+            } else {
+                File dataFolder = plugin.getDataFolder();
+                if (!dataFolder.exists() && !dataFolder.mkdirs()) {
+                    plugin.getLogger().severe("Could not create data folder: " + dataFolder.getAbsolutePath());
+                    return false;
+                }
+                File file = new File(dataFolder, storage.getString("sqlite-file", "econguard.db"));
+                loadDriver("org.sqlite.JDBC");
+                hikari.setJdbcUrl("jdbc:sqlite:" + file.getAbsolutePath());
+                hikari.setDriverClassName("org.sqlite.JDBC");
+                // One connection: SQLite is single-writer, so a pool of 1 avoids SQLITE_BUSY entirely.
+                hikari.setMaximumPoolSize(1);
+                hikari.setConnectionInitSql("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=5000;");
+            }
+
+            this.dataSource = new HikariDataSource(hikari);
             createTables();
-            writeConnection = open();
+            plugin.getLogger().info("EconGuard connected to " + type + " storage.");
             return true;
-        } catch (SQLException | ClassNotFoundException exception) {
-            plugin.getLogger().severe("SQLite connection failed: " + exception.getMessage());
+        } catch (Exception exception) {
+            plugin.getLogger().severe("EconGuard storage init failed: " + exception.getMessage());
             return false;
         }
     }
 
-    private Connection open() throws SQLException {
-        Connection newConnection = DriverManager.getConnection(jdbcUrl);
-        try (Statement statement = newConnection.createStatement()) {
-            statement.execute("PRAGMA journal_mode=WAL");
-            statement.execute("PRAGMA synchronous=NORMAL");
-            statement.execute("PRAGMA busy_timeout=5000");
-            statement.execute("PRAGMA cache_size=-8000");   // ~8 MB page cache
-            statement.execute("PRAGMA mmap_size=67108864");  // 64 MB memory-mapped I/O
-            statement.execute("PRAGMA temp_store=MEMORY");
+    private void loadDriver(String driverClass) {
+        try {
+            Class.forName(driverClass, true, getClass().getClassLoader());
+        } catch (ClassNotFoundException exception) {
+            plugin.getLogger().log(Level.WARNING, "JDBC driver not found on classpath: " + driverClass, exception);
         }
-        return newConnection;
+    }
+
+    private boolean mysql() {
+        return type == Type.MYSQL;
     }
 
     private void createTables() throws SQLException {
-        try (Statement statement = connection.createStatement()) {
-            statement.executeUpdate("""
-                    CREATE TABLE IF NOT EXISTS ledger (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        uuid TEXT NOT NULL,
-                        username TEXT,
-                        source TEXT NOT NULL,
-                        action TEXT NOT NULL,
-                        amount REAL NOT NULL,
-                        incoming INTEGER NOT NULL,
-                        counterparty TEXT,
-                        counterparty_name TEXT,
-                        item TEXT,
-                        balance_after REAL,
-                        note TEXT,
-                        created_at INTEGER NOT NULL
-                    )
-                    """);
-            statement.executeUpdate("CREATE INDEX IF NOT EXISTS idx_ledger_uuid_created ON ledger(uuid, created_at DESC)");
-            statement.executeUpdate("""
-                    CREATE TABLE IF NOT EXISTS flags (
-                        uuid TEXT PRIMARY KEY,
-                        username TEXT,
-                        type TEXT NOT NULL,
-                        reason TEXT NOT NULL,
-                        created_at INTEGER NOT NULL
-                    )
-                    """);
+        String ledgerDdl = mysql() ? """
+                CREATE TABLE IF NOT EXISTS ledger (
+                    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+                    uuid VARCHAR(36) NOT NULL,
+                    username VARCHAR(32),
+                    source VARCHAR(32) NOT NULL,
+                    action VARCHAR(64) NOT NULL,
+                    amount DOUBLE NOT NULL,
+                    incoming TINYINT NOT NULL,
+                    counterparty VARCHAR(36),
+                    counterparty_name VARCHAR(32),
+                    item VARCHAR(255),
+                    balance_after DOUBLE,
+                    note VARCHAR(1024),
+                    created_at BIGINT NOT NULL,
+                    KEY idx_ledger_uuid_created (uuid, created_at)
+                )
+                """ : """
+                CREATE TABLE IF NOT EXISTS ledger (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    uuid TEXT NOT NULL,
+                    username TEXT,
+                    source TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    amount REAL NOT NULL,
+                    incoming INTEGER NOT NULL,
+                    counterparty TEXT,
+                    counterparty_name TEXT,
+                    item TEXT,
+                    balance_after REAL,
+                    note TEXT,
+                    created_at INTEGER NOT NULL
+                )
+                """;
+
+        String flagsDdl = mysql() ? """
+                CREATE TABLE IF NOT EXISTS flags (
+                    uuid VARCHAR(36) PRIMARY KEY,
+                    username VARCHAR(32),
+                    type VARCHAR(64) NOT NULL,
+                    reason VARCHAR(512) NOT NULL,
+                    created_at BIGINT NOT NULL
+                )
+                """ : """
+                CREATE TABLE IF NOT EXISTS flags (
+                    uuid TEXT PRIMARY KEY,
+                    username TEXT,
+                    type TEXT NOT NULL,
+                    reason TEXT NOT NULL,
+                    created_at INTEGER NOT NULL
+                )
+                """;
+
+        try (Connection connection = dataSource.getConnection();
+             Statement statement = connection.createStatement()) {
+            statement.executeUpdate(ledgerDdl);
+            statement.executeUpdate(flagsDdl);
+            if (!mysql()) {
+                // MySQL declares the index inline (CREATE INDEX has no IF NOT EXISTS before 8.0.29).
+                statement.executeUpdate(
+                        "CREATE INDEX IF NOT EXISTS idx_ledger_uuid_created ON ledger(uuid, created_at DESC)");
+            }
         }
     }
+
+    // ------------------------------------------------------------------ writes (append-only, batched)
 
     /** Enqueues an audit row. Thread-safe and non-blocking; the row is persisted by the next flush. */
     public void record(MoneyEvent event) {
         writeQueue.add(new Queued(event, Instant.now().getEpochSecond()));
     }
 
-    /** Batches queued audit rows onto the write connection. Runs on a background thread (and on close). */
+    /** Batches queued audit rows on a pooled connection. Runs on a background thread (and on close). */
     public synchronized void flush() {
-        if (writeConnection == null) {
+        if (dataSource == null) {
             return;
         }
         List<Queued> batch = new ArrayList<>();
@@ -131,23 +207,24 @@ public final class Ledger {
         if (batch.isEmpty()) {
             return;
         }
-        boolean previousAutoCommit = true;
-        try {
-            previousAutoCommit = writeConnection.getAutoCommit();
-            writeConnection.setAutoCommit(false);
-            try (PreparedStatement statement = writeConnection.prepareStatement(INSERT_SQL)) {
+        try (Connection connection = dataSource.getConnection()) {
+            boolean previousAutoCommit = connection.getAutoCommit();
+            connection.setAutoCommit(false);
+            try (PreparedStatement statement = connection.prepareStatement(INSERT_SQL)) {
                 for (Queued row : batch) {
                     bindInsert(statement, row.event(), row.time());
                     statement.addBatch();
                 }
                 statement.executeBatch();
+                connection.commit();
+            } catch (SQLException exception) {
+                connection.rollback();
+                plugin.getLogger().warning("Could not flush " + batch.size() + " ledger rows: " + exception.getMessage());
+            } finally {
+                connection.setAutoCommit(previousAutoCommit);
             }
-            writeConnection.commit();
         } catch (SQLException exception) {
-            plugin.getLogger().warning("Could not flush " + batch.size() + " ledger rows: " + exception.getMessage());
-            rollbackQuietly(writeConnection);
-        } finally {
-            restoreAutoCommit(writeConnection, previousAutoCommit);
+            plugin.getLogger().warning("Ledger flush connection error: " + exception.getMessage());
         }
     }
 
@@ -162,13 +239,15 @@ public final class Ledger {
         statement.setString(8, event.counterpartyName());
         statement.setString(9, event.item());
         if (Double.isNaN(event.balanceAfter())) {
-            statement.setNull(10, java.sql.Types.REAL);
+            statement.setNull(10, java.sql.Types.DOUBLE);
         } else {
             statement.setDouble(10, event.balanceAfter());
         }
         statement.setString(11, event.note());
         statement.setLong(12, createdAt);
     }
+
+    // ------------------------------------------------------------------ reads
 
     public List<MoneyEvent> recent(UUID uuid, int limit) {
         flush(); // ensure just-enqueued rows are visible to history queries
@@ -178,7 +257,8 @@ public final class Ledger {
                 FROM ledger WHERE uuid = ? ORDER BY created_at DESC, id DESC LIMIT ?
                 """;
         List<MoneyEvent> events = new ArrayList<>();
-        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
             statement.setString(1, uuid.toString());
             statement.setInt(2, Math.max(1, limit));
             try (ResultSet rs = statement.executeQuery()) {
@@ -208,7 +288,8 @@ public final class Ledger {
 
     public long countLedger() {
         flush();
-        try (Statement statement = connection.createStatement();
+        try (Connection connection = dataSource.getConnection();
+             Statement statement = connection.createStatement();
              ResultSet rs = statement.executeQuery("SELECT COUNT(*) FROM ledger")) {
             return rs.next() ? rs.getLong(1) : 0L;
         } catch (SQLException exception) {
@@ -216,8 +297,18 @@ public final class Ledger {
         }
     }
 
+    // ------------------------------------------------------------------ flags
+
     public boolean saveFlag(Flag flag) {
-        String sql = """
+        String sql = mysql() ? """
+                INSERT INTO flags (uuid, username, type, reason, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON DUPLICATE KEY UPDATE
+                    username = VALUES(username),
+                    type = VALUES(type),
+                    reason = VALUES(reason),
+                    created_at = VALUES(created_at)
+                """ : """
                 INSERT INTO flags (uuid, username, type, reason, created_at)
                 VALUES (?, ?, ?, ?, ?)
                 ON CONFLICT(uuid) DO UPDATE SET
@@ -226,7 +317,8 @@ public final class Ledger {
                     reason = excluded.reason,
                     created_at = excluded.created_at
                 """;
-        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
             statement.setString(1, flag.player().toString());
             statement.setString(2, flag.playerName());
             statement.setString(3, flag.type());
@@ -243,7 +335,8 @@ public final class Ledger {
     public List<Flag> getFlags() {
         String sql = "SELECT uuid, username, type, reason, created_at FROM flags ORDER BY created_at DESC";
         List<Flag> flags = new ArrayList<>();
-        try (Statement statement = connection.createStatement();
+        try (Connection connection = dataSource.getConnection();
+             Statement statement = connection.createStatement();
              ResultSet rs = statement.executeQuery(sql)) {
             while (rs.next()) {
                 flags.add(new Flag(
@@ -260,7 +353,8 @@ public final class Ledger {
     }
 
     public boolean isFlagged(UUID uuid) {
-        try (PreparedStatement statement = connection.prepareStatement("SELECT 1 FROM flags WHERE uuid = ?")) {
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement statement = connection.prepareStatement("SELECT 1 FROM flags WHERE uuid = ?")) {
             statement.setString(1, uuid.toString());
             try (ResultSet rs = statement.executeQuery()) {
                 return rs.next();
@@ -271,7 +365,8 @@ public final class Ledger {
     }
 
     public boolean clearFlag(UUID uuid) {
-        try (PreparedStatement statement = connection.prepareStatement("DELETE FROM flags WHERE uuid = ?")) {
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement statement = connection.prepareStatement("DELETE FROM flags WHERE uuid = ?")) {
             statement.setString(1, uuid.toString());
             return statement.executeUpdate() > 0;
         } catch (SQLException exception) {
@@ -281,14 +376,17 @@ public final class Ledger {
     }
 
     public void clearFlags() {
-        try (Statement statement = connection.createStatement()) {
+        try (Connection connection = dataSource.getConnection();
+             Statement statement = connection.createStatement()) {
             statement.executeUpdate("DELETE FROM flags");
         } catch (SQLException exception) {
             plugin.getLogger().severe("Could not clear flags: " + exception.getMessage());
         }
     }
 
-    /** Prunes old ledger rows beyond the per-player cap. Uses its own connection; async-safe. */
+    // ------------------------------------------------------------------ maintenance
+
+    /** Prunes old ledger rows beyond the per-player cap. The window function runs on SQLite 3.25+/MySQL 8+. */
     public int prune(int maxPerPlayer) {
         if (maxPerPlayer <= 0) {
             return 0;
@@ -304,8 +402,8 @@ public final class Ledger {
                     WHERE ranked.rn <= ?
                 )
                 """;
-        try (Connection pruneConnection = open();
-             PreparedStatement statement = pruneConnection.prepareStatement(sql)) {
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
             statement.setInt(1, maxPerPlayer);
             return statement.executeUpdate();
         } catch (SQLException exception) {
@@ -314,45 +412,21 @@ public final class Ledger {
         }
     }
 
-    // synchronized so it cannot interleave with a background flush() on the write connection.
+    // synchronized so it cannot interleave with a background flush().
     public synchronized void close() {
         flush(); // drain anything still queued before shutting down
-        if (writeConnection != null) {
-            closeQuietly(writeConnection);
-            writeConnection = null;
+        if (dataSource == null) {
+            return;
         }
-        if (connection != null) {
-            try (Statement statement = connection.createStatement()) {
+        if (!mysql()) {
+            try (Connection connection = dataSource.getConnection();
+                 Statement statement = connection.createStatement()) {
                 statement.execute("PRAGMA wal_checkpoint(TRUNCATE)");
             } catch (SQLException ignored) {
                 // best effort
             }
-            closeQuietly(connection);
-            connection = null;
         }
-    }
-
-    private void rollbackQuietly(Connection target) {
-        try {
-            target.rollback();
-        } catch (SQLException exception) {
-            plugin.getLogger().warning("Could not roll back ledger flush: " + exception.getMessage());
-        }
-    }
-
-    private void restoreAutoCommit(Connection target, boolean value) {
-        try {
-            target.setAutoCommit(value);
-        } catch (SQLException exception) {
-            plugin.getLogger().warning("Could not restore auto-commit: " + exception.getMessage());
-        }
-    }
-
-    private void closeQuietly(Connection target) {
-        try {
-            target.close();
-        } catch (SQLException exception) {
-            plugin.getLogger().warning("Could not close connection: " + exception.getMessage());
-        }
+        dataSource.close();
+        dataSource = null;
     }
 }
