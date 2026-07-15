@@ -1,8 +1,18 @@
+# Build output
 target/
-build/
-.gradle/
 *.class
 *.jar
+
+# IDE
 .idea/
 *.iml
+.vscode/
+
+# OS junk
 .DS_Store
+Thumbs.db
+
+# Local server runtime state (generated on the server, never committed)
+*.db
+*.db-shm
+*.db-wal
