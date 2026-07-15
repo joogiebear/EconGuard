@@ -1,4 +1,4 @@
-package com.mystipixel.econguard.core;
+package com.mystipixel.econguard.service;
 
 import com.mystipixel.econguard.api.EconGuardAPI;
 import com.mystipixel.econguard.api.Flag;

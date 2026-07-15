@@ -1,4 +1,4 @@
-package com.mystipixel.econguard.core;
+package com.mystipixel.econguard.service;
 
 import com.mystipixel.econguard.util.Text;
 import org.bukkit.Bukkit;

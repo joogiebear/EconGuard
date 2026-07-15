@@ -2,9 +2,9 @@ package com.mystipixel.econguard;
 
 import com.mystipixel.econguard.api.EconGuardAPI;
 import com.mystipixel.econguard.command.EconGuardCommand;
-import com.mystipixel.econguard.core.Alerter;
-import com.mystipixel.econguard.core.AbuseMonitor;
-import com.mystipixel.econguard.core.EconGuardService;
+import com.mystipixel.econguard.service.Alerter;
+import com.mystipixel.econguard.service.AbuseMonitor;
+import com.mystipixel.econguard.service.EconGuardService;
 import com.mystipixel.econguard.data.Ledger;
 import org.bukkit.command.PluginCommand;
 import org.bukkit.event.EventHandler;

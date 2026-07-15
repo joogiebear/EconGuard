@@ -2,7 +2,7 @@ package com.mystipixel.econguard.command;
 
 import com.mystipixel.econguard.api.Flag;
 import com.mystipixel.econguard.api.MoneyEvent;
-import com.mystipixel.econguard.core.EconGuardService;
+import com.mystipixel.econguard.service.EconGuardService;
 import com.mystipixel.econguard.util.Text;
 import org.bukkit.Bukkit;
 import org.bukkit.OfflinePlayer;
