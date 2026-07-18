@@ -11,9 +11,16 @@ import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
 import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.plugin.ServicePriority;
+import java.util.Locale;
+
+import org.bstats.bukkit.Metrics;
+import org.bstats.charts.SimplePie;
 import org.bukkit.plugin.java.JavaPlugin;
 
 public final class EconGuardPlugin extends JavaPlugin implements Listener {
+
+    /** bStats project id. Identifies the plugin, not the server, so it is fixed rather than configurable. */
+    private static final int BSTATS_PLUGIN_ID = 32736;
     private Ledger ledger;
     private AbuseMonitor monitor;
     private EconGuardService service;
@@ -50,6 +57,7 @@ public final class EconGuardPlugin extends JavaPlugin implements Listener {
 
         getServer().getPluginManager().registerEvents(this, this);
         pruneLedger();
+        setupMetrics();
         getLogger().info("EconGuard enabled. Economy audit + anti-abuse core is active.");
     }
 
@@ -82,4 +90,16 @@ public final class EconGuardPlugin extends JavaPlugin implements Listener {
             }
         });
     }
+    /**
+     * Anonymous usage reporting via bStats.
+     *
+     * <p>Server owners who want no reporting disable it globally in plugins/bStats/config.yml, which
+     * is the mechanism bStats provides; the id itself is fixed because it names this plugin's project.
+     */
+    private void setupMetrics() {
+        Metrics metrics = new Metrics(this, BSTATS_PLUGIN_ID);
+        metrics.addCustomChart(new SimplePie("storage_backend",
+                () -> getConfig().getString("storage.type", "SQLITE").toUpperCase(Locale.ROOT)));
+    }
+
 }

@@ -58,3 +58,4 @@ detection:
     enabled: true
     window-minutes: 60
     threshold: 500000000.0
+
