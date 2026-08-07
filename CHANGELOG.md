@@ -1,3 +1,11 @@
+## 2026.32.0 — 2026-08-07
+
+### ✨ Features
+- report anonymous usage stats via bStats (`9352065`)
+
+### ⚡ Performance
+- stop blocking the money-event handler on flag lookups (`9e95ac6`)
+
 ## 2026.29.1 — 2026-07-17
 
 ### 🐛 Fixes
