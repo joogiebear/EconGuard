@@ -67,6 +67,29 @@ public final class EconGuardService implements EconGuardAPI {
         return ledger.recent(player, limit);
     }
 
+    @Override
+    public boolean isFlagged(UUID player) {
+        return player != null && ledger.isFlaggedFast(player);
+    }
+
+    @Override
+    public boolean allowTrade(UUID player) {
+        if (!plugin.getConfig().getBoolean("enforcement.block-flagged-trades", false)) {
+            return true;
+        }
+        return !isFlagged(player);
+    }
+
+    /** Recent ledger rows between two specific players, either direction, newest first. */
+    public List<MoneyEvent> pairRecent(UUID a, UUID b, int limit) {
+        return ledger.pairRecent(a, b, limit);
+    }
+
+    /** Totals received by each side of a pair from the other: {@code player -> {count, sum}}. */
+    public java.util.Map<UUID, double[]> pairTotals(UUID a, UUID b) {
+        return ledger.pairTotals(a, b);
+    }
+
     public AbuseMonitor monitor() {
         return monitor;
     }

@@ -39,6 +39,15 @@ young-account:
   max-age-days: 3          # account first joined within this many days counts as young
   max-playtime-hours: 10   # OR online playtime below this many hours counts as young
 
+# Enforcement. Detection only ever raises flags; this decides what a flag DOES.
+enforcement:
+  # true  - feature plugins that consult EconGuard before a trade (RoyalBazaar today) refuse
+  #         trades from flagged players until the flag is cleared with /econguard flags clear.
+  # false - flags are alert-only: staff review them, nothing is blocked. The default, because
+  #         a false positive that locks a legitimate player out of the economy is worse than a
+  #         few hours of a real abuser trading while staff catch up.
+  block-flagged-trades: false
+
 detection:
   # A single transaction at/above this magnitude is logged as a large-transaction alert.
   large-transaction: 100000000.0

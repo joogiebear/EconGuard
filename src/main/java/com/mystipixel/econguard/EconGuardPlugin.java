@@ -78,6 +78,26 @@ public final class EconGuardPlugin extends JavaPlugin implements Listener {
         }
     }
 
+    /**
+     * Alerts fire live, but a staff member who joins after a flag was raised would otherwise see
+     * nothing until they happen to run /econguard flags. Reads the in-memory flag count (no query)
+     * and lands after the join noise.
+     */
+    @EventHandler
+    public void onPlayerJoin(org.bukkit.event.player.PlayerJoinEvent event) {
+        if (!getConfig().getBoolean("notify-staff", true) || ledger == null) {
+            return;
+        }
+        var player = event.getPlayer();
+        getServer().getScheduler().runTaskLater(this, () -> {
+            int pending = ledger.flaggedCount();
+            if (pending > 0 && player.isOnline() && player.hasPermission("econguard.alerts")) {
+                player.sendMessage(com.mystipixel.econguard.util.Text.color("&c[EconGuard] &e" + pending
+                        + " player(s) flagged for review. &7/econguard flags"));
+            }
+        }, 40L);
+    }
+
     private void pruneLedger() {
         int maxPerPlayer = getConfig().getInt("database.max-rows-per-player", 500);
         if (maxPerPlayer <= 0) {

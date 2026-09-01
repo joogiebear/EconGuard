@@ -64,4 +64,14 @@ public final class EconGuard {
             api.record(builder.build());
         });
     }
+
+    /**
+     * Flat, reflection-friendly pre-trade veto: false means this player's trades should be refused
+     * right now (they are flagged and {@code enforcement.block-flagged-trades} is on). Returns true
+     * when EconGuard's service is unavailable, so feature plugins can call it unconditionally with
+     * no state of their own. O(1) — safe to call on every trade.
+     */
+    public static boolean allowTrade(UUID player) {
+        return get().map(api -> api.allowTrade(player)).orElse(true);
+    }
 }

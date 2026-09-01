@@ -50,6 +50,7 @@ public final class EconGuardCommand implements CommandExecutor, TabCompleter {
         switch (args[0].toLowerCase()) {
             case "flags" -> Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> flags(sender, args));
             case "history" -> Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> history(sender, args));
+            case "pair" -> Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> pair(sender, args));
             case "stats" -> Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> stats(sender));
             case "reload" -> {
                 plugin.reloadConfig();
@@ -116,6 +117,56 @@ public final class EconGuardCommand implements CommandExecutor, TabCompleter {
         }
     }
 
+    /**
+     * {@code /econguard pair <a> <b> [limit]} — everything the ledger knows about one pair of
+     * players: what each received from the other in total, then the recent transfers. This is the
+     * question staff actually ask when the collusion signal fires, and the reason every ledger row
+     * carries a counterparty.
+     */
+    private void pair(CommandSender sender, String[] args) {
+        if (args.length < 3) {
+            send(sender, "&cUsage: /econguard pair <player> <player> [limit]");
+            return;
+        }
+        OfflinePlayer a = Bukkit.getOfflinePlayer(args[1]);
+        OfflinePlayer b = Bukkit.getOfflinePlayer(args[2]);
+        int limit = 10;
+        if (args.length >= 4) {
+            try {
+                limit = Math.max(1, Math.min(50, Integer.parseInt(args[3])));
+            } catch (NumberFormatException ignored) {
+                send(sender, "&cLimit must be a number.");
+                return;
+            }
+        }
+        Map<UUID, double[]> totals = service.pairTotals(a.getUniqueId(), b.getUniqueId());
+        List<MoneyEvent> rows = service.pairRecent(a.getUniqueId(), b.getUniqueId(), limit);
+        if (totals.isEmpty() && rows.isEmpty()) {
+            send(sender, "&eNo ledger entries between " + args[1] + " and " + args[2] + ".");
+            return;
+        }
+        String symbol = plugin.getConfig().getString("currency-symbol", "$");
+        send(sender, "&eLedger between &f" + args[1] + " &eand &f" + args[2] + "&e:");
+        sendTotal(sender, args[1], totals.get(a.getUniqueId()), symbol);
+        sendTotal(sender, args[2], totals.get(b.getUniqueId()), symbol);
+        for (MoneyEvent event : rows) {
+            String arrow = event.incoming() ? "&a→ " : "&c← ";
+            send(sender, "&7" + arrow + "&f" + event.playerName() + " &7"
+                    + event.action() + " " + Text.money(event.amount(), symbol)
+                    + " &8| &f" + event.source()
+                    + (event.item() == null ? "" : " &8[" + event.item() + "]"));
+        }
+    }
+
+    private void sendTotal(CommandSender sender, String name, double[] total, String symbol) {
+        if (total == null) {
+            send(sender, "&7  " + name + " received: &fnothing");
+            return;
+        }
+        send(sender, "&7  " + name + " received &f" + Text.money(total[1], symbol)
+                + " &7in &f" + (long) total[0] + "&7 transfer(s)");
+    }
+
     private void stats(CommandSender sender) {
         List<Flag> flags = service.getFlags();
         long ledgerRows = service.ledgerCount();
@@ -137,6 +188,7 @@ public final class EconGuardCommand implements CommandExecutor, TabCompleter {
         send(sender, "&eEconGuard commands:");
         send(sender, "&7/econguard flags [clear [player]]");
         send(sender, "&7/econguard history <player> [limit]");
+        send(sender, "&7/econguard pair <player> <player> [limit]");
         send(sender, "&7/econguard stats");
         send(sender, "&7/econguard reload");
     }
@@ -151,15 +203,17 @@ public final class EconGuardCommand implements CommandExecutor, TabCompleter {
             return Collections.emptyList();
         }
         if (args.length == 1) {
-            return filter(Arrays.asList("flags", "history", "stats", "reload"), args[0]);
+            return filter(Arrays.asList("flags", "history", "pair", "stats", "reload"), args[0]);
         }
         if (args.length == 2 && args[0].equalsIgnoreCase("flags")) {
             return filter(Collections.singletonList("clear"), args[1]);
         }
-        if (args.length == 2 && args[0].equalsIgnoreCase("history")) {
+        boolean nameSlot = (args.length == 2 && args[0].equalsIgnoreCase("history"))
+                || ((args.length == 2 || args.length == 3) && args[0].equalsIgnoreCase("pair"));
+        if (nameSlot) {
             List<String> names = new ArrayList<>();
             Bukkit.getOnlinePlayers().forEach(p -> names.add(p.getName()));
-            return filter(names, args[1]);
+            return filter(names, args[args.length - 1]);
         }
         return Collections.emptyList();
     }

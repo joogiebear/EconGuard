@@ -48,6 +48,13 @@ public final class Ledger {
     private final JavaPlugin plugin;
     private final Queue<Queued> writeQueue = new ConcurrentLinkedQueue<>();
 
+    /**
+     * In-memory mirror of the flags table's player ids, loaded at connect and maintained by every
+     * flag write. It exists so the per-trade veto ({@code allowTrade}) is an O(1) set lookup on the
+     * main thread instead of a blocking query inside another plugin's transaction.
+     */
+    private final java.util.Set<UUID> flaggedCache = java.util.concurrent.ConcurrentHashMap.newKeySet();
+
     private Type type;
     private HikariDataSource dataSource;
 
@@ -101,6 +108,7 @@ public final class Ledger {
 
             this.dataSource = new HikariDataSource(hikari);
             createTables();
+            loadFlagCache();
             plugin.getLogger().info("EconGuard connected to " + type + " storage.");
             return true;
         } catch (Exception exception) {
@@ -263,27 +271,91 @@ public final class Ledger {
             statement.setInt(2, Math.max(1, limit));
             try (ResultSet rs = statement.executeQuery()) {
                 while (rs.next()) {
-                    double balanceAfter = rs.getDouble("balance_after");
-                    if (rs.wasNull()) {
-                        balanceAfter = Double.NaN;
-                    }
-                    String counterparty = rs.getString("counterparty");
-                    events.add(MoneyEvent.builder(UUID.fromString(rs.getString("uuid")), rs.getString("username"))
-                            .source(rs.getString("source"))
-                            .action(rs.getString("action"))
-                            .amount(rs.getDouble("amount"))
-                            .incoming(rs.getInt("incoming") != 0)
-                            .counterparty(counterparty == null ? null : UUID.fromString(counterparty), rs.getString("counterparty_name"))
-                            .item(rs.getString("item"))
-                            .balanceAfter(balanceAfter)
-                            .note(rs.getString("note"))
-                            .build());
+                    events.add(readEvent(rs));
                 }
             }
         } catch (SQLException exception) {
             plugin.getLogger().severe("Could not read ledger for " + uuid + ": " + exception.getMessage());
         }
         return events;
+    }
+
+    private MoneyEvent readEvent(ResultSet rs) throws SQLException {
+        double balanceAfter = rs.getDouble("balance_after");
+        if (rs.wasNull()) {
+            balanceAfter = Double.NaN;
+        }
+        String counterparty = rs.getString("counterparty");
+        return MoneyEvent.builder(UUID.fromString(rs.getString("uuid")), rs.getString("username"))
+                .source(rs.getString("source"))
+                .action(rs.getString("action"))
+                .amount(rs.getDouble("amount"))
+                .incoming(rs.getInt("incoming") != 0)
+                .counterparty(counterparty == null ? null : UUID.fromString(counterparty), rs.getString("counterparty_name"))
+                .item(rs.getString("item"))
+                .balanceAfter(balanceAfter)
+                .note(rs.getString("note"))
+                .build();
+    }
+
+    /** The most recent ledger rows between two specific players, in either direction, newest first. */
+    public List<MoneyEvent> pairRecent(UUID a, UUID b, int limit) {
+        flush();
+        String sql = """
+                SELECT uuid, username, source, action, amount, incoming, counterparty, counterparty_name,
+                       item, balance_after, note
+                FROM ledger
+                WHERE (uuid = ? AND counterparty = ?) OR (uuid = ? AND counterparty = ?)
+                ORDER BY created_at DESC, id DESC LIMIT ?
+                """;
+        List<MoneyEvent> events = new ArrayList<>();
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, a.toString());
+            statement.setString(2, b.toString());
+            statement.setString(3, b.toString());
+            statement.setString(4, a.toString());
+            statement.setInt(5, Math.max(1, limit));
+            try (ResultSet rs = statement.executeQuery()) {
+                while (rs.next()) {
+                    events.add(readEvent(rs));
+                }
+            }
+        } catch (SQLException exception) {
+            plugin.getLogger().severe("Could not read the pair ledger: " + exception.getMessage());
+        }
+        return events;
+    }
+
+    /**
+     * Totals received by each side of a pair from the other, as {@code player -> {count, sum}} over
+     * the incoming rows. Two entries at most; a player who never received anything is simply absent.
+     */
+    public java.util.Map<UUID, double[]> pairTotals(UUID a, UUID b) {
+        flush();
+        String sql = """
+                SELECT uuid, COUNT(*) c, SUM(amount) s
+                FROM ledger
+                WHERE incoming = 1 AND ((uuid = ? AND counterparty = ?) OR (uuid = ? AND counterparty = ?))
+                GROUP BY uuid
+                """;
+        java.util.Map<UUID, double[]> out = new java.util.HashMap<>();
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, a.toString());
+            statement.setString(2, b.toString());
+            statement.setString(3, b.toString());
+            statement.setString(4, a.toString());
+            try (ResultSet rs = statement.executeQuery()) {
+                while (rs.next()) {
+                    out.put(UUID.fromString(rs.getString("uuid")),
+                            new double[]{rs.getLong("c"), rs.getDouble("s")});
+                }
+            }
+        } catch (SQLException exception) {
+            plugin.getLogger().severe("Could not total the pair ledger: " + exception.getMessage());
+        }
+        return out;
     }
 
     public long countLedger() {
@@ -298,6 +370,33 @@ public final class Ledger {
     }
 
     // ------------------------------------------------------------------ flags
+
+    private void loadFlagCache() {
+        flaggedCache.clear();
+        try (Connection connection = dataSource.getConnection();
+             Statement statement = connection.createStatement();
+             ResultSet rs = statement.executeQuery("SELECT uuid FROM flags")) {
+            while (rs.next()) {
+                try {
+                    flaggedCache.add(UUID.fromString(rs.getString(1)));
+                } catch (IllegalArgumentException ignored) {
+                    // a malformed row can't veto anyone; getFlags() will surface it
+                }
+            }
+        } catch (SQLException exception) {
+            plugin.getLogger().warning("Could not preload the flag cache: " + exception.getMessage());
+        }
+    }
+
+    /** Whether this player is flagged, from the in-memory mirror. O(1), any thread. */
+    public boolean isFlaggedFast(UUID uuid) {
+        return flaggedCache.contains(uuid);
+    }
+
+    /** How many players are currently flagged, from the in-memory mirror. */
+    public int flaggedCount() {
+        return flaggedCache.size();
+    }
 
     public boolean saveFlag(Flag flag) {
         String sql = mysql() ? """
@@ -325,6 +424,7 @@ public final class Ledger {
             statement.setString(4, flag.reason());
             statement.setLong(5, flag.timestamp());
             statement.executeUpdate();
+            flaggedCache.add(flag.player());
             return true;
         } catch (SQLException exception) {
             plugin.getLogger().severe("Could not save flag for " + flag.player() + ": " + exception.getMessage());
@@ -368,7 +468,11 @@ public final class Ledger {
         try (Connection connection = dataSource.getConnection();
              PreparedStatement statement = connection.prepareStatement("DELETE FROM flags WHERE uuid = ?")) {
             statement.setString(1, uuid.toString());
-            return statement.executeUpdate() > 0;
+            boolean cleared = statement.executeUpdate() > 0;
+            if (cleared) {
+                flaggedCache.remove(uuid);
+            }
+            return cleared;
         } catch (SQLException exception) {
             plugin.getLogger().severe("Could not clear flag for " + uuid + ": " + exception.getMessage());
             return false;
@@ -379,6 +483,7 @@ public final class Ledger {
         try (Connection connection = dataSource.getConnection();
              Statement statement = connection.createStatement()) {
             statement.executeUpdate("DELETE FROM flags");
+            flaggedCache.clear();
         } catch (SQLException exception) {
             plugin.getLogger().severe("Could not clear flags: " + exception.getMessage());
         }
