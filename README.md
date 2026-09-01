@@ -1,6 +1,6 @@
 # EconGuard
 
-**Shared economy audit ledger and anti-abuse / RMT-detection core** for Paper.
+**Shared economy audit ledger and anti-abuse / RMT-detection core** for Paper. Requires Paper 26.2 or newer.
 
 EconGuard doesn't move money and has no player-facing features. It's the piece the *other* economy
 plugins report to: one ledger, one place to look, one audit trail for a ban or rollback.
