@@ -44,10 +44,13 @@ public final class EconGuardCommand implements CommandExecutor, TabCompleter {
             usage(sender);
             return true;
         }
+        // The three query subcommands read (and flush) the database, and history resolves an offline
+        // player by name — all blocking I/O, so they run off the main thread. Paper's chat sends are
+        // thread-safe, so replying from the async task is fine.
         switch (args[0].toLowerCase()) {
-            case "flags" -> flags(sender, args);
-            case "history" -> history(sender, args);
-            case "stats" -> stats(sender);
+            case "flags" -> Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> flags(sender, args));
+            case "history" -> Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> history(sender, args));
+            case "stats" -> Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> stats(sender));
             case "reload" -> {
                 plugin.reloadConfig();
                 new com.mystipixel.econguard.config.ConfigValidator(plugin).validate();
