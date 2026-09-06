@@ -1,3 +1,14 @@
+## 2026.36.0 — 2026-09-06
+
+### ✨ Features
+- enforcement, pair inspection, and a staff join notice (`bbbdc3e`)
+
+### ⚡ Performance
+- run the query subcommands off the main thread (`a6e7325`)
+
+### 📝 Documentation
+- state the Paper 26.2-or-newer requirement (`676b0a7`)
+
 ## 2026.32.0 — 2026-08-07
 
 ### ✨ Features
