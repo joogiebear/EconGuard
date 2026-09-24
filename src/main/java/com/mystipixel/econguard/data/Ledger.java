@@ -146,7 +146,7 @@ public final class Ledger {
                     note VARCHAR(1024),
                     created_at BIGINT NOT NULL,
                     KEY idx_ledger_uuid_created (uuid, created_at)
-                )
+                ) DEFAULT CHARSET=utf8mb4
                 """ : """
                 CREATE TABLE IF NOT EXISTS ledger (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -172,7 +172,7 @@ public final class Ledger {
                     type VARCHAR(64) NOT NULL,
                     reason VARCHAR(512) NOT NULL,
                     created_at BIGINT NOT NULL
-                )
+                ) DEFAULT CHARSET=utf8mb4
                 """ : """
                 CREATE TABLE IF NOT EXISTS flags (
                     uuid TEXT PRIMARY KEY,
@@ -191,6 +191,44 @@ public final class Ledger {
                 // MySQL declares the index inline (CREATE INDEX has no IF NOT EXISTS before 8.0.29).
                 statement.executeUpdate(
                         "CREATE INDEX IF NOT EXISTS idx_ledger_uuid_created ON ledger(uuid, created_at DESC)");
+            }
+        }
+        if (mysql()) {
+            convertToUtf8mb4(List.of("ledger", "flags"));
+        }
+    }
+
+    /**
+     * Tables created before utf8mb4 was declared took the server's default charset, which on MySQL 5.7
+     * and MariaDB is often latin1 or utf8mb3. An item name with an emoji or other four-byte character
+     * then fails its insert in strict mode, and the whole batch rolls back with it. Converting copies the
+     * table, so it can take a while on a large ledger; it happens once. A failure is logged, not fatal:
+     * the ledger still works for everything the old charset can hold.
+     */
+    private void convertToUtf8mb4(List<String> tables) {
+        String query = "SELECT TABLE_NAME, TABLE_COLLATION FROM information_schema.TABLES "
+                + "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?";
+        for (String table : tables) {
+            try (Connection connection = dataSource.getConnection();
+                 PreparedStatement select = connection.prepareStatement(query)) {
+                select.setString(1, table);
+                try (ResultSet rows = select.executeQuery()) {
+                    if (!rows.next()) {
+                        continue;
+                    }
+                    String collation = rows.getString("TABLE_COLLATION");
+                    if (collation != null && collation.toLowerCase(Locale.ROOT).startsWith("utf8mb4")) {
+                        continue;
+                    }
+                    plugin.getLogger().info("Converting the " + table + " table from " + collation
+                            + " to utf8mb4 so item names with emoji can be recorded. This runs once.");
+                }
+                try (Statement alter = connection.createStatement()) {
+                    alter.executeUpdate("ALTER TABLE " + table + " CONVERT TO CHARACTER SET utf8mb4");
+                }
+            } catch (SQLException exception) {
+                plugin.getLogger().log(Level.WARNING, "Could not convert the " + table + " table to utf8mb4;"
+                        + " rows with emoji or other 4-byte characters may fail to save.", exception);
             }
         }
     }
