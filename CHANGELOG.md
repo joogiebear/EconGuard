@@ -1,3 +1,13 @@
+## 2026.39.1 — 2026-09-24
+
+### 🐛 Fixes
+- store the ledger as utf8mb4 so emoji item names save (`44dc8f5`)
+- use the ISO week-year for release versions (`b887f39`)
+
+### 📝 Documentation
+- list RoyalTrade among plugins that honour the trade veto (`f48e800`)
+- add MIT license (`9d157f5`)
+
 ## 2026.39.0 — 2026-09-23
 
 ### 🔧 Other
