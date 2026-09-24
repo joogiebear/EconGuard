@@ -41,8 +41,8 @@ young-account:
 
 # Enforcement. Detection only ever raises flags; this decides what a flag DOES.
 enforcement:
-  # true  - feature plugins that consult EconGuard before a trade (RoyalBazaar today) refuse
-  #         trades from flagged players until the flag is cleared with /econguard flags clear.
+  # true  - feature plugins that consult EconGuard before a trade (RoyalBazaar, RoyalTrade)
+  #         refuse trades from flagged players until the flag is cleared with /econguard flags clear.
   # false - flags are alert-only: staff review them, nothing is blocked. The default, because
   #         a false positive that locks a legitimate player out of the economy is worse than a
   #         few hours of a real abuser trading while staff catch up.
