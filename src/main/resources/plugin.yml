@@ -5,10 +5,11 @@ api-version: '26.2'
 author: Mystipixel
 description: Shared economy audit ledger and anti-abuse / RMT detection core.
 # JDBC drivers + connection pool are downloaded at runtime by Paper's library loader.
+# Keep these versions identical to the matching dependencies in pom.xml.
 libraries:
-  - org.xerial:sqlite-jdbc:3.46.1.3
-  - com.zaxxer:HikariCP:5.1.0
-  - com.mysql:mysql-connector-j:8.4.0
+  - org.xerial:sqlite-jdbc:3.53.4.0
+  - com.zaxxer:HikariCP:7.1.0
+  - com.mysql:mysql-connector-j:26.7.0
 commands:
   econguard:
     description: EconGuard anti-abuse admin tools.
