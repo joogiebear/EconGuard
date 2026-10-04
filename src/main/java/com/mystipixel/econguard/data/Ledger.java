@@ -102,8 +102,10 @@ public final class Ledger {
                 hikari.setJdbcUrl("jdbc:sqlite:" + file.getAbsolutePath());
                 hikari.setDriverClassName("org.sqlite.JDBC");
                 // One connection: SQLite is single-writer, so a pool of 1 avoids SQLITE_BUSY entirely.
-                hikari.setMaximumPoolSize(1);
-                hikari.setConnectionInitSql("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=5000;");
+                hikari.setMaximumPoolSize(SqliteSettings.POOL_SIZE);
+                // Driver properties, not connectionInitSql: sqlite-jdbc prepares only the first statement
+                // of a multi-statement init string, so synchronous and busy_timeout were being dropped.
+                hikari.setDataSourceProperties(SqliteSettings.properties());
             }
 
             this.dataSource = new HikariDataSource(hikari);
