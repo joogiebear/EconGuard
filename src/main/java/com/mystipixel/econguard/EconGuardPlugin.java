@@ -9,7 +9,6 @@ import com.mystipixel.econguard.data.Ledger;
 import org.bukkit.command.PluginCommand;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
-import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.plugin.ServicePriority;
 import java.util.Locale;
 
@@ -68,13 +67,6 @@ public final class EconGuardPlugin extends JavaPlugin implements Listener {
         }
         if (ledger != null) {
             ledger.close();
-        }
-    }
-
-    @EventHandler
-    public void onPlayerQuit(PlayerQuitEvent event) {
-        if (monitor != null) {
-            monitor.clearVelocity(event.getPlayer().getUniqueId());
         }
     }
 

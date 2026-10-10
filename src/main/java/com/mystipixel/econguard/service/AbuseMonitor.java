@@ -9,7 +9,7 @@ import org.bukkit.Statistic;
 import org.bukkit.entity.Player;
 import org.bukkit.plugin.java.JavaPlugin;
 
-import java.time.Instant;
+import java.time.Clock;
 import java.util.ArrayDeque;
 import java.util.Deque;
 import java.util.Map;
@@ -39,14 +39,21 @@ public final class AbuseMonitor {
     // the per-event hot path. Online players read straight off the live Player object (already cached).
     private final Map<UUID, Long> firstPlayedCache = new ConcurrentHashMap<>();
 
+    private final Clock clock;
+
     public AbuseMonitor(JavaPlugin plugin, Ledger ledger, Alerter alerter) {
+        this(plugin, ledger, alerter, Clock.systemUTC());
+    }
+
+    AbuseMonitor(JavaPlugin plugin, Ledger ledger, Alerter alerter, Clock clock) {
         this.plugin = plugin;
         this.ledger = ledger;
         this.alerter = alerter;
+        this.clock = clock;
     }
 
     public void analyze(MoneyEvent event) {
-        long now = Instant.now().getEpochSecond();
+        long now = clock.instant().getEpochSecond();
         String symbol = plugin.getConfig().getString("currency-symbol", "$");
 
         // 1. Large single transaction (informational alert, any account).
@@ -101,17 +108,13 @@ public final class AbuseMonitor {
         }
     }
 
-    public void clearVelocity(UUID uuid) {
-        velocityWindows.remove(uuid);
-    }
-
     /**
      * Drops window entries whose samples have all aged out, bounding memory. pairWindows is keyed by
      * (payer,receiver) pairs that are never tied to a session, so without this sweep it would grow
      * unbounded. Runs on the main thread (scheduled by the plugin).
      */
     public void sweep() {
-        long now = Instant.now().getEpochSecond();
+        long now = clock.instant().getEpochSecond();
         long velocitySeconds = Math.max(1L, plugin.getConfig().getLong("detection.velocity.window-minutes", 30L)) * 60L;
         long pairSeconds = Math.max(1L, plugin.getConfig().getLong("detection.counterparty.window-minutes", 60L)) * 60L;
         pruneStale(velocityWindows, now, velocitySeconds);
@@ -139,7 +142,7 @@ public final class AbuseMonitor {
             return;
         }
         String safeName = safe(name);
-        long now = Instant.now().getEpochSecond();
+        long now = clock.instant().getEpochSecond();
         plugin.getServer().getScheduler().runTaskAsynchronously(plugin, () -> {
             try {
                 if (ledger.saveFlag(new Flag(uuid, safeName, type, reason, now))) {

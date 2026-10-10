@@ -16,9 +16,13 @@ import org.junit.jupiter.api.io.TempDir;
 import org.mockito.MockedStatic;
 
 import java.nio.file.Path;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneOffset;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.Statement;
+import java.util.Map;
 import java.util.UUID;
 import java.util.logging.Logger;
 
@@ -49,6 +53,7 @@ class AbuseMonitorTest {
     private Alerter alerter;
     private AbuseMonitor monitor;
     private MockedStatic<Bukkit> bukkit;
+    private final MutableClock clock = new MutableClock();
 
     @BeforeEach
     void setUp() {
@@ -76,7 +81,7 @@ class AbuseMonitorTest {
         ledger = new Ledger(plugin);
         assertTrue(ledger.connect());
         alerter = mock(Alerter.class);
-        monitor = new AbuseMonitor(plugin, ledger, alerter);
+        monitor = new AbuseMonitor(plugin, ledger, alerter, clock);
     }
 
     @AfterEach
@@ -158,8 +163,72 @@ class AbuseMonitorTest {
 
         assertTrue(ledger.isFlaggedFast(alt, "velocity"));
         assertFalse(ledger.isFlaggedFast(alt, "collusion"));
-        monitor = new AbuseMonitor(plugin, ledger, alerter);
+        monitor = new AbuseMonitor(plugin, ledger, alerter, clock);
         monitor.analyze(transfer(500));
         assertEquals(2, ledger.getFlags().size());
+    }
+
+    @Test
+    void velocityAddsUpAcrossSeparateEvents() {
+        config.set("detection.young-incoming-transfer", 0);
+        config.set("detection.velocity.threshold", 1000.0);
+        monitor.analyze(transfer(600));
+        assertFalse(ledger.isFlaggedFast(alt));
+        clock.advanceSeconds(10 * 60);
+
+        monitor.analyze(transfer(600));
+
+        assertTrue(ledger.isFlaggedFast(alt, "velocity"));
+    }
+
+    @Test
+    void sweepEvictsWindowsOnlyOnceTheirSamplesAgeOut() throws Exception {
+        config.set("detection.young-incoming-transfer", 0);
+        config.set("detection.velocity.threshold", 1000.0);
+        config.set("detection.counterparty.threshold", 1000.0);
+        monitor.analyze(transfer(100));
+
+        clock.advanceSeconds(29 * 60);
+        monitor.sweep();
+        assertEquals(1, window(monitor, "velocityWindows").size());
+        assertEquals(1, window(monitor, "pairWindows").size());
+
+        clock.advanceSeconds(2 * 60);
+        monitor.sweep();
+        assertTrue(window(monitor, "velocityWindows").isEmpty());
+        assertEquals(1, window(monitor, "pairWindows").size());
+
+        clock.advanceSeconds(30 * 60);
+        monitor.sweep();
+        assertTrue(window(monitor, "pairWindows").isEmpty());
+    }
+
+    private static Map<?, ?> window(AbuseMonitor monitor, String field) throws Exception {
+        var declared = AbuseMonitor.class.getDeclaredField(field);
+        declared.setAccessible(true);
+        return (Map<?, ?>) declared.get(monitor);
+    }
+
+    private static final class MutableClock extends Clock {
+        private Instant now = Instant.parse("2026-10-10T12:00:00Z");
+
+        void advanceSeconds(long seconds) {
+            now = now.plusSeconds(seconds);
+        }
+
+        @Override
+        public Instant instant() {
+            return now;
+        }
+
+        @Override
+        public java.time.ZoneId getZone() {
+            return ZoneOffset.UTC;
+        }
+
+        @Override
+        public Clock withZone(java.time.ZoneId zone) {
+            return this;
+        }
     }
 }
