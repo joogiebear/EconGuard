@@ -36,6 +36,16 @@ public final class Ledger {
     public enum Type { SQLITE, MYSQL }
 
     private static final int FLUSH_BATCH_CAP = 2000;
+    private static final String SQLITE_FLAGS_DDL = """
+            CREATE TABLE IF NOT EXISTS %s (
+                uuid TEXT NOT NULL,
+                username TEXT,
+                type TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                PRIMARY KEY (uuid, type)
+            )
+            """;
     private static final String INSERT_SQL = """
             INSERT INTO ledger (uuid, username, source, action, amount, incoming,
                                 counterparty, counterparty_name, item, balance_after, note, created_at)
@@ -49,11 +59,11 @@ public final class Ledger {
     private final Queue<Queued> writeQueue = new ConcurrentLinkedQueue<>();
 
     /**
-     * In-memory mirror of the flags table's player ids, loaded at connect and maintained by every
-     * flag write. It exists so the per-trade veto ({@code allowTrade}) is an O(1) set lookup on the
+     * In-memory mirror of the flags table (player id to flag types), loaded at connect and maintained
+     * by every flag write. It exists so the per-trade veto ({@code allowTrade}) is an O(1) lookup on the
      * main thread instead of a blocking query inside another plugin's transaction.
      */
-    private final java.util.Set<UUID> flaggedCache = java.util.concurrent.ConcurrentHashMap.newKeySet();
+    private final java.util.Map<UUID, java.util.Set<String>> flaggedCache = new java.util.concurrent.ConcurrentHashMap<>();
 
     private Type type;
     private HikariDataSource dataSource;
@@ -169,21 +179,14 @@ public final class Ledger {
 
         String flagsDdl = mysql() ? """
                 CREATE TABLE IF NOT EXISTS flags (
-                    uuid VARCHAR(36) PRIMARY KEY,
+                    uuid VARCHAR(36) NOT NULL,
                     username VARCHAR(32),
                     type VARCHAR(64) NOT NULL,
                     reason VARCHAR(512) NOT NULL,
-                    created_at BIGINT NOT NULL
+                    created_at BIGINT NOT NULL,
+                    PRIMARY KEY (uuid, type)
                 ) DEFAULT CHARSET=utf8mb4
-                """ : """
-                CREATE TABLE IF NOT EXISTS flags (
-                    uuid TEXT PRIMARY KEY,
-                    username TEXT,
-                    type TEXT NOT NULL,
-                    reason TEXT NOT NULL,
-                    created_at INTEGER NOT NULL
-                )
-                """;
+                """ : SQLITE_FLAGS_DDL.formatted("flags");
 
         try (Connection connection = dataSource.getConnection();
              Statement statement = connection.createStatement()) {
@@ -197,6 +200,45 @@ public final class Ledger {
         }
         if (mysql()) {
             convertToUtf8mb4(List.of("ledger", "flags"));
+        }
+        keyFlagsByType();
+    }
+
+    // Tables from 2026.40.0 and earlier keyed flags by uuid alone, so a second flag type overwrote the first.
+    private void keyFlagsByType() throws SQLException {
+        try (Connection connection = dataSource.getConnection()) {
+            int keyColumns = 0;
+            try (ResultSet keys = connection.getMetaData().getPrimaryKeys(
+                    mysql() ? connection.getCatalog() : null, null, "flags")) {
+                while (keys.next()) {
+                    keyColumns++;
+                }
+            }
+            if (keyColumns != 1) {
+                return;
+            }
+            plugin.getLogger().info("Updating the flags table so a player can hold more than one flag type.");
+            try (Statement statement = connection.createStatement()) {
+                if (mysql()) {
+                    statement.executeUpdate("ALTER TABLE flags DROP PRIMARY KEY, ADD PRIMARY KEY (uuid, type)");
+                    return;
+                }
+                boolean autoCommit = connection.getAutoCommit();
+                connection.setAutoCommit(false);
+                try {
+                    statement.executeUpdate(SQLITE_FLAGS_DDL.formatted("flags_by_type"));
+                    statement.executeUpdate("INSERT INTO flags_by_type (uuid, username, type, reason, created_at)"
+                            + " SELECT uuid, username, type, reason, created_at FROM flags");
+                    statement.executeUpdate("DROP TABLE flags");
+                    statement.executeUpdate("ALTER TABLE flags_by_type RENAME TO flags");
+                    connection.commit();
+                } catch (SQLException exception) {
+                    connection.rollback();
+                    throw exception;
+                } finally {
+                    connection.setAutoCommit(autoCommit);
+                }
+            }
         }
     }
 
@@ -415,10 +457,10 @@ public final class Ledger {
         flaggedCache.clear();
         try (Connection connection = dataSource.getConnection();
              Statement statement = connection.createStatement();
-             ResultSet rs = statement.executeQuery("SELECT uuid FROM flags")) {
+             ResultSet rs = statement.executeQuery("SELECT uuid, type FROM flags")) {
             while (rs.next()) {
                 try {
-                    flaggedCache.add(UUID.fromString(rs.getString(1)));
+                    cacheFlag(UUID.fromString(rs.getString(1)), rs.getString(2));
                 } catch (IllegalArgumentException ignored) {
                     // a malformed row can't veto anyone; getFlags() will surface it
                 }
@@ -430,7 +472,17 @@ public final class Ledger {
 
     /** Whether this player is flagged, from the in-memory mirror. O(1), any thread. */
     public boolean isFlaggedFast(UUID uuid) {
-        return flaggedCache.contains(uuid);
+        return flaggedCache.containsKey(uuid);
+    }
+
+    /** Whether this player holds a flag of this type, from the in-memory mirror. O(1), any thread. */
+    public boolean isFlaggedFast(UUID uuid, String type) {
+        java.util.Set<String> types = flaggedCache.get(uuid);
+        return types != null && types.contains(type);
+    }
+
+    private void cacheFlag(UUID uuid, String type) {
+        flaggedCache.computeIfAbsent(uuid, id -> java.util.concurrent.ConcurrentHashMap.newKeySet()).add(type);
     }
 
     /** How many players are currently flagged, from the in-memory mirror. */
@@ -444,15 +496,13 @@ public final class Ledger {
                 VALUES (?, ?, ?, ?, ?)
                 ON DUPLICATE KEY UPDATE
                     username = VALUES(username),
-                    type = VALUES(type),
                     reason = VALUES(reason),
                     created_at = VALUES(created_at)
                 """ : """
                 INSERT INTO flags (uuid, username, type, reason, created_at)
                 VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(uuid) DO UPDATE SET
+                ON CONFLICT(uuid, type) DO UPDATE SET
                     username = excluded.username,
-                    type = excluded.type,
                     reason = excluded.reason,
                     created_at = excluded.created_at
                 """;
@@ -464,7 +514,7 @@ public final class Ledger {
             statement.setString(4, flag.reason());
             statement.setLong(5, flag.timestamp());
             statement.executeUpdate();
-            flaggedCache.add(flag.player());
+            cacheFlag(flag.player(), flag.type());
             return true;
         } catch (SQLException exception) {
             plugin.getLogger().severe("Could not save flag for " + flag.player() + ": " + exception.getMessage());
@@ -490,18 +540,6 @@ public final class Ledger {
             plugin.getLogger().severe("Could not load flags: " + exception.getMessage());
         }
         return flags;
-    }
-
-    public boolean isFlagged(UUID uuid) {
-        try (Connection connection = dataSource.getConnection();
-             PreparedStatement statement = connection.prepareStatement("SELECT 1 FROM flags WHERE uuid = ?")) {
-            statement.setString(1, uuid.toString());
-            try (ResultSet rs = statement.executeQuery()) {
-                return rs.next();
-            }
-        } catch (SQLException exception) {
-            return false;
-        }
     }
 
     public boolean clearFlag(UUID uuid) {

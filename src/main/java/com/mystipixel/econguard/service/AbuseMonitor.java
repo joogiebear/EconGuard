@@ -31,8 +31,8 @@ public final class AbuseMonitor {
     private final JavaPlugin plugin;
     private final Ledger ledger;
     private final Alerter alerter;
-    /** Players already alerted on this session — keeps the per-event fast path off the database. */
-    private final java.util.Set<UUID> alertedThisSession = ConcurrentHashMap.newKeySet();
+    // "uuid:type" flags whose save is still in flight, so a burst of events can't write the same flag twice.
+    private final java.util.Set<String> pendingFlags = ConcurrentHashMap.newKeySet();
     private final Map<UUID, Deque<Sample>> velocityWindows = new ConcurrentHashMap<>();
     private final Map<String, Deque<Sample>> pairWindows = new ConcurrentHashMap<>();
     // Cache of immutable first-played timestamps for OFFLINE uuids, to avoid repeated disk lookups on
@@ -132,27 +132,24 @@ public final class AbuseMonitor {
     }
 
     private void raise(UUID uuid, String name, String type, String reason) {
-        // This runs inside the money-event handler, i.e. on the server thread inside another plugin's
-        // transaction. It used to do a SELECT plus an UPSERT here (and the collusion branch calls
-        // raise() twice, so four blocking round trips per event). Now the main thread only does an
-        // O(1) set insert; the database work happens off-thread.
-        //
-        // The set doubles as the "don't spam alerts" guard: add() is atomic, so only the first caller
-        // for a given player proceeds. It is per-session, so the authoritative isFlagged() check below
-        // still runs off-thread to cover players already flagged before a restart.
-        if (!alertedThisSession.add(uuid)) {
+        // Dedup on the flag cache (loaded from the database, cleared with the flag), so clearing a flag
+        // re-arms detection. The pending key only covers the gap until the async save lands.
+        String key = uuid + ":" + type;
+        if (ledger.isFlaggedFast(uuid, type) || !pendingFlags.add(key)) {
             return;
         }
         String safeName = safe(name);
         long now = Instant.now().getEpochSecond();
         plugin.getServer().getScheduler().runTaskAsynchronously(plugin, () -> {
-            if (ledger.isFlagged(uuid)) {
-                return;                          // already on record from a previous session
+            try {
+                if (ledger.saveFlag(new Flag(uuid, safeName, type, reason, now))) {
+                    plugin.getServer().getScheduler().runTask(plugin, () ->
+                            alerter.alert("&4[EconGuard] FLAGGED &e" + safeName + " &7- " + reason
+                                    + ". &7Review: &f/econguard history " + safeName));
+                }
+            } finally {
+                pendingFlags.remove(key);
             }
-            ledger.saveFlag(new Flag(uuid, safeName, type, reason, now));
-            plugin.getServer().getScheduler().runTask(plugin, () ->
-                    alerter.alert("&4[EconGuard] FLAGGED &e" + safeName + " &7- " + reason
-                            + ". &7Review: &f/econguard history " + safeName));
         });
     }
 
