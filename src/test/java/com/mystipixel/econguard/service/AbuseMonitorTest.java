@@ -3,7 +3,9 @@ package com.mystipixel.econguard.service;
 import com.mystipixel.econguard.api.MoneyEvent;
 import com.mystipixel.econguard.data.Ledger;
 import org.bukkit.Bukkit;
+import org.bukkit.OfflinePlayer;
 import org.bukkit.Server;
+import org.bukkit.Statistic;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.entity.Player;
 import org.bukkit.plugin.java.JavaPlugin;
@@ -53,6 +55,7 @@ class AbuseMonitorTest {
     private Alerter alerter;
     private AbuseMonitor monitor;
     private MockedStatic<Bukkit> bukkit;
+    private BukkitScheduler scheduler;
     private final MutableClock clock = new MutableClock();
 
     @BeforeEach
@@ -67,7 +70,7 @@ class AbuseMonitorTest {
         when(plugin.getDataFolder()).thenReturn(folder.toFile());
         when(plugin.getLogger()).thenReturn(Logger.getLogger("test"));
         Server server = mock(Server.class);
-        BukkitScheduler scheduler = mock(BukkitScheduler.class);
+        scheduler = mock(BukkitScheduler.class);
         when(plugin.getServer()).thenReturn(server);
         when(server.getScheduler()).thenReturn(scheduler);
         when(scheduler.runTask(eq(plugin), any(Runnable.class))).thenAnswer(inline());
@@ -201,6 +204,66 @@ class AbuseMonitorTest {
         clock.advanceSeconds(30 * 60);
         monitor.sweep();
         assertTrue(window(monitor, "pairWindows").isEmpty());
+    }
+
+    private <T extends OfflinePlayer> T account(Class<T> type, long daysOld, long hoursPlayed) {
+        T player = mock(type);
+        when(player.getUniqueId()).thenReturn(alt);
+        when(player.getFirstPlayed()).thenReturn(clock.millis() - daysOld * 86_400_000L);
+        when(player.getStatistic(Statistic.PLAY_ONE_MINUTE)).thenReturn((int) (hoursPlayed * 3600 * 20));
+        return player;
+    }
+
+    private void goOffline() {
+        bukkit.when(() -> Bukkit.getPlayer(alt)).thenReturn(null);
+    }
+
+    @Test
+    void anOfflineAltWithLittlePlaytimeIsYoung() {
+        OfflinePlayer offline = account(OfflinePlayer.class, 30, 1);
+        goOffline();
+        bukkit.when(() -> Bukkit.getOfflinePlayer(alt)).thenReturn(offline);
+
+        monitor.analyze(transfer(500));
+
+        assertTrue(ledger.isFlaggedFast(alt, "young-incoming"));
+    }
+
+    @Test
+    void anOfflineVeteranIsNotYoungOnceItsAgeIsKnown() {
+        OfflinePlayer offline = account(OfflinePlayer.class, 30, 500);
+        goOffline();
+        bukkit.when(() -> Bukkit.getOfflinePlayer(alt)).thenReturn(offline);
+        BukkitScheduler deferred = mock(BukkitScheduler.class);
+        when(plugin.getServer().getScheduler()).thenReturn(deferred);
+        java.util.List<Runnable> queued = new java.util.ArrayList<>();
+        when(deferred.runTaskAsynchronously(eq(plugin), any(Runnable.class))).thenAnswer(invocation -> {
+            queued.add(invocation.getArgument(1));
+            return mock(BukkitTask.class);
+        });
+
+        monitor.analyze(transfer(500));
+        bukkit.verify(() -> Bukkit.getOfflinePlayer(alt), never());
+        assertEquals(2, queued.size(), "an age load and a flag save, both off the main thread");
+
+        when(plugin.getServer().getScheduler()).thenReturn(scheduler);
+        queued.forEach(Runnable::run);
+        assertTrue(ledger.clearFlag(alt));
+        monitor.analyze(transfer(500));
+
+        assertFalse(ledger.isFlaggedFast(alt));
+    }
+
+    @Test
+    void quittingRemembersTheAccountAge() {
+        Player leaving = account(Player.class, 30, 500);
+        monitor.rememberAge(leaving);
+        goOffline();
+
+        monitor.analyze(transfer(500));
+
+        bukkit.verify(() -> Bukkit.getOfflinePlayer(alt), never());
+        assertFalse(ledger.isFlaggedFast(alt));
     }
 
     private static Map<?, ?> window(AbuseMonitor monitor, String field) throws Exception {
