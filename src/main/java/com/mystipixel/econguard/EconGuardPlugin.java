@@ -19,7 +19,7 @@ import org.bukkit.plugin.java.JavaPlugin;
 
 public final class EconGuardPlugin extends JavaPlugin implements Listener {
 
-    /** bStats project id. Identifies the plugin, not the server, so it is fixed rather than configurable. */
+    // identifies this plugin's bStats project, not the server, so it isn't configurable
     private static final int BSTATS_PLUGIN_ID = 32736;
     private Ledger ledger;
     private AbuseMonitor monitor;
@@ -43,9 +43,7 @@ public final class EconGuardPlugin extends JavaPlugin implements Listener {
 
         getServer().getServicesManager().register(EconGuardAPI.class, service, this, ServicePriority.Normal);
 
-        // Flush the append-only audit queue off the main thread (every second).
         getServer().getScheduler().runTaskTimerAsynchronously(this, ledger::flush, 20L, 20L);
-        // Periodically bound the in-memory detection windows (every 5 minutes).
         getServer().getScheduler().runTaskTimer(this, monitor::sweep, 6000L, 6000L);
 
         PluginCommand command = getCommand("econguard");
@@ -78,11 +76,7 @@ public final class EconGuardPlugin extends JavaPlugin implements Listener {
         }
     }
 
-    /**
-     * Alerts fire live, but a staff member who joins after a flag was raised would otherwise see
-     * nothing until they happen to run /econguard flags. Reads the in-memory flag count (no query)
-     * and lands after the join noise.
-     */
+    // staff joining after a flag was raised would otherwise miss it; delayed to land after the join noise
     @EventHandler
     public void onPlayerJoin(org.bukkit.event.player.PlayerJoinEvent event) {
         if (!getConfig().getBoolean("notify-staff", true) || ledger == null) {
@@ -110,12 +104,7 @@ public final class EconGuardPlugin extends JavaPlugin implements Listener {
             }
         });
     }
-    /**
-     * Anonymous usage reporting via bStats.
-     *
-     * <p>Server owners who want no reporting disable it globally in plugins/bStats/config.yml, which
-     * is the mechanism bStats provides; the id itself is fixed because it names this plugin's project.
-     */
+    // owners opt out globally in plugins/bStats/config.yml
     private void setupMetrics() {
         Metrics metrics = new Metrics(this, BSTATS_PLUGIN_ID);
         metrics.addCustomChart(new SimplePie("storage_backend",

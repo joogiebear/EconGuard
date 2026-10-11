@@ -44,9 +44,8 @@ public final class EconGuardCommand implements CommandExecutor, TabCompleter {
             usage(sender);
             return true;
         }
-        // The three query subcommands read (and flush) the database, and history resolves an offline
-        // player by name — all blocking I/O, so they run off the main thread. Paper's chat sends are
-        // thread-safe, so replying from the async task is fine.
+        // query subcommands do blocking I/O (database, offline player by name), so they run async;
+        // Paper's sendMessage is thread-safe
         switch (args[0].toLowerCase()) {
             case "flags" -> Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> flags(sender, args));
             case "history" -> Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> history(sender, args));
@@ -117,12 +116,7 @@ public final class EconGuardCommand implements CommandExecutor, TabCompleter {
         }
     }
 
-    /**
-     * {@code /econguard pair <a> <b> [limit]} — everything the ledger knows about one pair of
-     * players: what each received from the other in total, then the recent transfers. This is the
-     * question staff actually ask when the collusion signal fires, and the reason every ledger row
-     * carries a counterparty.
-     */
+    // /econguard pair <a> <b> [limit]: what each received from the other in total, then recent transfers
     private void pair(CommandSender sender, String[] args) {
         if (args.length < 3) {
             send(sender, "&cUsage: /econguard pair <player> <player> [limit]");

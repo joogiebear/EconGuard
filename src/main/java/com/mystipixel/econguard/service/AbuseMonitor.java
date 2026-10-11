@@ -21,12 +21,9 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Cross-flow anti-abuse analysis. Runs on the main thread for each reported {@link MoneyEvent}.
- *
- * Key idea: wealth alone is not suspicious - legit players get rich too. The signals here target
- * wealth that arrives FAST and with NO time invested (the RMT fingerprint), and money funneled
- * repeatedly between the same two accounts (collusion). The velocity / large-incoming signals only
- * fire on "young" accounts, so a veteran selling a lucky drop is not flagged.
+ * Anti-abuse analysis, run on the main thread for each {@link MoneyEvent}. Wealth alone isn't suspicious:
+ * the signals target money that arrives fast on young accounts, and money funneled repeatedly between
+ * the same two accounts.
  */
 public final class AbuseMonitor {
     private record Sample(long time, double amount) {
@@ -72,7 +69,6 @@ public final class AbuseMonitor {
         long now = clock.instant().getEpochSecond();
         String symbol = plugin.getConfig().getString("currency-symbol", "$");
 
-        // 1. Large single transaction (informational alert, any account).
         double largeThreshold = plugin.getConfig().getDouble("detection.large-transaction", 100_000_000.0);
         if (largeThreshold > 0 && event.amount() >= largeThreshold) {
             alerter.alert("&c[EconGuard] &e" + safe(event.playerName()) + " &7" + event.action() + " &f"
@@ -80,13 +76,11 @@ public final class AbuseMonitor {
                     + (event.hasCounterparty() ? " &7(party: &f" + safe(event.counterpartyName()) + "&7)" : ""));
         }
 
-        // The remaining signals are about money ARRIVING to a player.
         if (!event.incoming()) {
             return;
         }
         boolean young = isYoungAccount(event.player());
 
-        // 2. A young account receiving a large single transfer from another player.
         double youngIncoming = plugin.getConfig().getDouble("detection.young-incoming-transfer", 50_000_000.0);
         if (young && event.hasCounterparty() && youngIncoming > 0 && event.amount() >= youngIncoming) {
             raise(event.player(), event.playerName(), "young-incoming",
@@ -94,8 +88,7 @@ public final class AbuseMonitor {
                             + safe(event.counterpartyName()) + " via " + event.source());
         }
 
-        // 3. Velocity: a young account gaining too much, too fast. Only tracked for young accounts -
-        //    veterans can never trip this signal, so we don't accumulate windows for them.
+        // young accounts only, so no windows build up for veterans
         if (young && plugin.getConfig().getBoolean("detection.velocity.enabled", true)) {
             long windowMinutes = Math.max(1L, plugin.getConfig().getLong("detection.velocity.window-minutes", 30L));
             double threshold = plugin.getConfig().getDouble("detection.velocity.threshold", 250_000_000.0);
@@ -107,7 +100,6 @@ public final class AbuseMonitor {
             }
         }
 
-        // 4. Counterparty correlation: same payer funneling money to the same receiver (any age).
         if (plugin.getConfig().getBoolean("detection.counterparty.enabled", true) && event.hasCounterparty()) {
             long windowMinutes = Math.max(1L, plugin.getConfig().getLong("detection.counterparty.window-minutes", 60L));
             double threshold = plugin.getConfig().getDouble("detection.counterparty.threshold", 500_000_000.0);
@@ -117,18 +109,13 @@ public final class AbuseMonitor {
             if (threshold > 0 && total >= threshold) {
                 String detail = Text.money(total, symbol) + " moved " + safe(event.counterpartyName())
                         + " -> " + safe(event.playerName()) + " within " + windowMinutes + "m (possible collusion)";
-                // Flag BOTH ends of the suspected ring (each dedup'd independently).
                 raise(event.player(), event.playerName(), "collusion", "Received: " + detail);
                 raise(event.counterparty(), event.counterpartyName(), "collusion", "Sent: " + detail);
             }
         }
     }
 
-    /**
-     * Drops window entries whose samples have all aged out, bounding memory. pairWindows is keyed by
-     * (payer,receiver) pairs that are never tied to a session, so without this sweep it would grow
-     * unbounded. Runs on the main thread (scheduled by the plugin).
-     */
+    /** Drops windows whose samples have all aged out; pair windows would otherwise grow without bound. */
     public void sweep() {
         long now = clock.instant().getEpochSecond();
         long velocitySeconds = Math.max(1L, plugin.getConfig().getLong("detection.velocity.window-minutes", 30L)) * 60L;

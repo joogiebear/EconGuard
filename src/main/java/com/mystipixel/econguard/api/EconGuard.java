@@ -18,7 +18,7 @@ import java.util.Optional;
  *
  * <p>Plugins that would rather not take a build-time dependency on EconGuard can instead call the
  * flat {@link #record(UUID, String, String, String, double, boolean, double, UUID, String, String, String)}
- * bridge by reflection - a single method invocation with only JDK types in its signature:
+ * bridge by reflection:
  * <pre>{@code
  * Class<?> eg = Class.forName("com.mystipixel.econguard.api.EconGuard");
  * eg.getMethod("record", UUID.class, String.class, String.class, String.class, double.class,
@@ -37,10 +37,8 @@ public final class EconGuard {
     }
 
     /**
-     * Flat, reflection-friendly recorder. Builds a {@link MoneyEvent} and records it if the service is
-     * available; a no-op otherwise. Its signature uses only JDK types so feature plugins can invoke it
-     * reflectively without compiling against EconGuard. Pass {@link Double#NaN} for {@code balanceAfter}
-     * when the source has no running balance, and {@code null} for any unused reference argument.
+     * Reflection-friendly recorder (JDK types only); a no-op when the service is unavailable. Pass
+     * {@link Double#NaN} for {@code balanceAfter} when there is no running balance, {@code null} for unused references.
      */
     public static void record(UUID player, String playerName, String source, String action,
                               double amount, boolean incoming, double balanceAfter,
@@ -66,10 +64,8 @@ public final class EconGuard {
     }
 
     /**
-     * Flat, reflection-friendly pre-trade veto: false means this player's trades should be refused
-     * right now (they are flagged and {@code enforcement.block-flagged-trades} is on). Returns true
-     * when EconGuard's service is unavailable, so feature plugins can call it unconditionally with
-     * no state of their own. O(1) — safe to call on every trade.
+     * Reflection-friendly pre-trade veto: false means refuse this player's trades (flagged and
+     * {@code enforcement.block-flagged-trades} on). True when the service is unavailable. O(1), safe on every trade.
      */
     public static boolean allowTrade(UUID player) {
         return get().map(api -> api.allowTrade(player)).orElse(true);
