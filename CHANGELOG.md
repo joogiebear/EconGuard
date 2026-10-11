@@ -1,3 +1,16 @@
+## 2026.41.0 - 2026-10-10
+
+### Fixes
+- check playtime for offline recipients (`a06118d`)
+- keep velocity windows across a relog (`9750a00`)
+- re-arm flag detection after a flag is cleared (`cbbc0a7`)
+
+### Refactors
+- read all player-facing text from config (`b3bb450`)
+
+### Documentation
+- add AGENTS.md with the suite's development standards (`a9ad220`)
+
 ## 2026.40.0 — 2026-10-03
 
 ### 🐛 Fixes
