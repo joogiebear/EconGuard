@@ -2,6 +2,7 @@ package com.mystipixel.econguard.command;
 
 import com.mystipixel.econguard.api.Flag;
 import com.mystipixel.econguard.api.MoneyEvent;
+import com.mystipixel.econguard.message.MessageManager;
 import com.mystipixel.econguard.service.EconGuardService;
 import com.mystipixel.econguard.util.Text;
 import org.bukkit.Bukkit;
@@ -28,16 +29,18 @@ public final class EconGuardCommand implements CommandExecutor, TabCompleter {
 
     private final JavaPlugin plugin;
     private final EconGuardService service;
+    private final MessageManager messages;
 
-    public EconGuardCommand(JavaPlugin plugin, EconGuardService service) {
+    public EconGuardCommand(JavaPlugin plugin, EconGuardService service, MessageManager messages) {
         this.plugin = plugin;
         this.service = service;
+        this.messages = messages;
     }
 
     @Override
     public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
         if (!sender.hasPermission("econguard.admin")) {
-            send(sender, "&cYou do not have permission to use EconGuard.");
+            messages.send(sender, "no-permission");
             return true;
         }
         if (args.length == 0) {
@@ -54,7 +57,8 @@ public final class EconGuardCommand implements CommandExecutor, TabCompleter {
             case "reload" -> {
                 plugin.reloadConfig();
                 new com.mystipixel.econguard.config.ConfigValidator(plugin).validate();
-                send(sender, "&aEconGuard config reloaded.");
+                messages.reload();
+                messages.send(sender, "reloaded");
             }
             default -> usage(sender);
         }
@@ -66,29 +70,34 @@ public final class EconGuardCommand implements CommandExecutor, TabCompleter {
             if (args.length >= 3) {
                 OfflinePlayer target = Bukkit.getOfflinePlayer(args[2]);
                 boolean cleared = service.clearFlag(target.getUniqueId());
-                send(sender, cleared ? "&aCleared flag for " + args[2] + "." : "&eNo flag found for " + args[2] + ".");
+                if (cleared) {
+                    messages.send(sender, "flags.cleared-one", "player", args[2]);
+                } else {
+                    messages.send(sender, "flags.not-found", "player", args[2]);
+                }
             } else {
                 service.clearFlags();
-                send(sender, "&aCleared all flags.");
+                messages.send(sender, "flags.cleared-all");
             }
             return;
         }
         List<Flag> flags = service.getFlags();
         if (flags.isEmpty()) {
-            send(sender, "&aNo anti-abuse flags. All clear.");
+            messages.send(sender, "flags.empty");
             return;
         }
-        send(sender, "&eEconGuard flags (" + flags.size() + "): &7/econguard flags clear [player]");
+        messages.send(sender, "flags.header", "count", String.valueOf(flags.size()));
         long now = Instant.now().getEpochSecond();
         for (Flag flag : flags) {
             long minutesAgo = Math.max(0L, (now - flag.timestamp()) / 60L);
-            send(sender, "&c• &e" + flag.playerName() + " &8[" + flag.type() + "] &7" + flag.reason() + " &8(" + minutesAgo + "m ago)");
+            messages.send(sender, "flags.line", "player", flag.playerName(), "type", flag.type(),
+                    "reason", flag.reason(), "minutes", String.valueOf(minutesAgo));
         }
     }
 
     private void history(CommandSender sender, String[] args) {
         if (args.length < 2) {
-            send(sender, "&cUsage: /econguard history <player> [limit]");
+            messages.send(sender, "history.usage");
             return;
         }
         int limit = 10;
@@ -96,30 +105,32 @@ public final class EconGuardCommand implements CommandExecutor, TabCompleter {
             try {
                 limit = Math.max(1, Math.min(50, Integer.parseInt(args[2])));
             } catch (NumberFormatException ignored) {
-                send(sender, "&cLimit must be a number.");
+                messages.send(sender, "limit-not-number");
                 return;
             }
         }
         OfflinePlayer target = Bukkit.getOfflinePlayer(args[1]);
         List<MoneyEvent> history = service.getHistory(target.getUniqueId(), limit);
         if (history.isEmpty()) {
-            send(sender, "&eNo ledger history for " + args[1] + ".");
+            messages.send(sender, "history.empty", "player", args[1]);
             return;
         }
         String symbol = plugin.getConfig().getString("currency-symbol", "$");
-        send(sender, "&eLedger for " + args[1] + " (" + history.size() + "):");
+        messages.send(sender, "history.header", "player", args[1], "count", String.valueOf(history.size()));
         for (MoneyEvent event : history) {
-            String arrow = event.incoming() ? "&a+" : "&c-";
-            String party = event.hasCounterparty() ? " &8(" + event.counterpartyName() + ")" : "";
-            String item = event.item() == null ? "" : " &8[" + event.item() + "]";
-            send(sender, "&7" + arrow + Text.money(event.amount(), symbol) + " &8| &f" + event.source() + "/" + event.action() + party + item);
+            String direction = event.incoming() ? messages.get("history.incoming") : messages.get("history.outgoing");
+            String party = event.hasCounterparty()
+                    ? messages.get("history.counterparty", "name", event.counterpartyName()) : "";
+            String item = event.item() == null ? "" : messages.get("history.item", "item", event.item());
+            messages.send(sender, "history.line", "direction", direction, "amount", Text.money(event.amount(), symbol),
+                    "source", event.source(), "action", event.action(), "counterparty", party, "item", item);
         }
     }
 
     // /econguard pair <a> <b> [limit]: what each received from the other in total, then recent transfers
     private void pair(CommandSender sender, String[] args) {
         if (args.length < 3) {
-            send(sender, "&cUsage: /econguard pair <player> <player> [limit]");
+            messages.send(sender, "pair.usage");
             return;
         }
         OfflinePlayer a = Bukkit.getOfflinePlayer(args[1]);
@@ -129,66 +140,58 @@ public final class EconGuardCommand implements CommandExecutor, TabCompleter {
             try {
                 limit = Math.max(1, Math.min(50, Integer.parseInt(args[3])));
             } catch (NumberFormatException ignored) {
-                send(sender, "&cLimit must be a number.");
+                messages.send(sender, "limit-not-number");
                 return;
             }
         }
         Map<UUID, double[]> totals = service.pairTotals(a.getUniqueId(), b.getUniqueId());
         List<MoneyEvent> rows = service.pairRecent(a.getUniqueId(), b.getUniqueId(), limit);
         if (totals.isEmpty() && rows.isEmpty()) {
-            send(sender, "&eNo ledger entries between " + args[1] + " and " + args[2] + ".");
+            messages.send(sender, "pair.empty", "first", args[1], "second", args[2]);
             return;
         }
         String symbol = plugin.getConfig().getString("currency-symbol", "$");
-        send(sender, "&eLedger between &f" + args[1] + " &eand &f" + args[2] + "&e:");
+        messages.send(sender, "pair.header", "first", args[1], "second", args[2]);
         sendTotal(sender, args[1], totals.get(a.getUniqueId()), symbol);
         sendTotal(sender, args[2], totals.get(b.getUniqueId()), symbol);
         for (MoneyEvent event : rows) {
-            String arrow = event.incoming() ? "&a→ " : "&c← ";
-            send(sender, "&7" + arrow + "&f" + event.playerName() + " &7"
-                    + event.action() + " " + Text.money(event.amount(), symbol)
-                    + " &8| &f" + event.source()
-                    + (event.item() == null ? "" : " &8[" + event.item() + "]"));
+            String direction = event.incoming() ? messages.get("pair.incoming") : messages.get("pair.outgoing");
+            String item = event.item() == null ? "" : messages.get("pair.item", "item", event.item());
+            messages.send(sender, "pair.line", "direction", direction, "player", event.playerName(),
+                    "action", event.action(), "amount", Text.money(event.amount(), symbol),
+                    "source", event.source(), "item", item);
         }
     }
 
     private void sendTotal(CommandSender sender, String name, double[] total, String symbol) {
         if (total == null) {
-            send(sender, "&7  " + name + " received: &fnothing");
+            messages.send(sender, "pair.received-nothing", "player", name);
             return;
         }
-        send(sender, "&7  " + name + " received &f" + Text.money(total[1], symbol)
-                + " &7in &f" + (long) total[0] + "&7 transfer(s)");
+        messages.send(sender, "pair.received", "player", name, "amount", Text.money(total[1], symbol),
+                "count", String.valueOf((long) total[0]));
     }
 
     private void stats(CommandSender sender) {
         List<Flag> flags = service.getFlags();
         long ledgerRows = service.ledgerCount();
-        send(sender, "&eEconGuard stats:");
-        send(sender, "&7  Ledger rows: &f" + (ledgerRows < 0 ? "?" : ledgerRows));
-        send(sender, "&7  Pending flags: &f" + flags.size());
+        messages.send(sender, "stats.header");
+        String rows = ledgerRows < 0 ? messages.get("stats.ledger-rows-unknown") : String.valueOf(ledgerRows);
+        messages.send(sender, "stats.ledger-rows", "rows", rows);
+        messages.send(sender, "stats.pending-flags", "count", String.valueOf(flags.size()));
         if (!flags.isEmpty()) {
             Map<String, Integer> byType = new TreeMap<>();
             for (Flag flag : flags) {
                 byType.merge(flag.type(), 1, Integer::sum);
             }
             for (Map.Entry<String, Integer> entry : byType.entrySet()) {
-                send(sender, "&8    - " + entry.getKey() + ": &f" + entry.getValue());
+                messages.send(sender, "stats.type-line", "type", entry.getKey(), "count", String.valueOf(entry.getValue()));
             }
         }
     }
 
     private void usage(CommandSender sender) {
-        send(sender, "&eEconGuard commands:");
-        send(sender, "&7/econguard flags [clear [player]]");
-        send(sender, "&7/econguard history <player> [limit]");
-        send(sender, "&7/econguard pair <player> <player> [limit]");
-        send(sender, "&7/econguard stats");
-        send(sender, "&7/econguard reload");
-    }
-
-    private void send(CommandSender sender, String message) {
-        sender.sendMessage(Text.color(message));
+        messages.sendList(sender, "help");
     }
 
     @Override

@@ -2,6 +2,7 @@ package com.mystipixel.econguard;
 
 import com.mystipixel.econguard.api.EconGuardAPI;
 import com.mystipixel.econguard.command.EconGuardCommand;
+import com.mystipixel.econguard.message.MessageManager;
 import com.mystipixel.econguard.service.Alerter;
 import com.mystipixel.econguard.service.AbuseMonitor;
 import com.mystipixel.econguard.service.EconGuardService;
@@ -24,11 +25,13 @@ public final class EconGuardPlugin extends JavaPlugin implements Listener {
     private Ledger ledger;
     private AbuseMonitor monitor;
     private EconGuardService service;
+    private MessageManager messages;
 
     @Override
     public void onEnable() {
         saveDefaultConfig();
         new com.mystipixel.econguard.config.ConfigValidator(this).validate();
+        this.messages = new MessageManager(this);
 
         this.ledger = new Ledger(this);
         if (!ledger.connect()) {
@@ -38,7 +41,7 @@ public final class EconGuardPlugin extends JavaPlugin implements Listener {
         }
 
         Alerter alerter = new Alerter(this);
-        this.monitor = new AbuseMonitor(this, ledger, alerter);
+        this.monitor = new AbuseMonitor(this, ledger, alerter, messages);
         this.service = new EconGuardService(this, ledger, monitor);
 
         getServer().getServicesManager().register(EconGuardAPI.class, service, this, ServicePriority.Normal);
@@ -48,7 +51,7 @@ public final class EconGuardPlugin extends JavaPlugin implements Listener {
 
         PluginCommand command = getCommand("econguard");
         if (command != null) {
-            EconGuardCommand handler = new EconGuardCommand(this, service);
+            EconGuardCommand handler = new EconGuardCommand(this, service, messages);
             command.setExecutor(handler);
             command.setTabCompleter(handler);
         }
@@ -86,8 +89,7 @@ public final class EconGuardPlugin extends JavaPlugin implements Listener {
         getServer().getScheduler().runTaskLater(this, () -> {
             int pending = ledger.flaggedCount();
             if (pending > 0 && player.isOnline() && player.hasPermission("econguard.alerts")) {
-                player.sendMessage(com.mystipixel.econguard.util.Text.color("&c[EconGuard] &e" + pending
-                        + " player(s) flagged for review. &7/econguard flags"));
+                messages.send(player, "alerts.join-pending", "count", String.valueOf(pending));
             }
         }, 40L);
     }
