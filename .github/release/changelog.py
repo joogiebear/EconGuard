@@ -25,12 +25,12 @@ log = subprocess.run(
 
 # Ordered display groups
 GROUPS = [
-    ("feat", "✨ Features"),
-    ("fix", "\U0001f41b Fixes"),
-    ("perf", "⚡ Performance"),
-    ("refactor", "♻️ Refactors"),
-    ("docs", "\U0001f4dd Documentation"),
-    ("other", "\U0001f527 Other"),
+    ("feat", "Features"),
+    ("fix", "Fixes"),
+    ("perf", "Performance"),
+    ("refactor", "Refactors"),
+    ("docs", "Documentation"),
+    ("other", "Other"),
 ]
 # Conventional types intentionally hidden from the changelog
 SKIP = {"chore", "ci", "build", "test", "style"}
@@ -59,7 +59,7 @@ try:
     date = datetime.datetime.now(ZoneInfo("America/Chicago")).date().isoformat()
 except Exception:  # no tz database (e.g. Windows without tzdata)
     date = datetime.date.today().isoformat()
-out = [f"## {version} — {date}", ""]
+out = [f"## {version} - {date}", ""]
 has_entries = False
 for key, title in GROUPS:
     if buckets[key]:
