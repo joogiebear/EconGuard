@@ -5,14 +5,18 @@ import com.mystipixel.econguard.api.MoneyEvent;
 import com.mystipixel.econguard.data.Ledger;
 import com.mystipixel.econguard.util.Text;
 import org.bukkit.Bukkit;
+import org.bukkit.OfflinePlayer;
 import org.bukkit.Statistic;
 import org.bukkit.entity.Player;
 import org.bukkit.plugin.java.JavaPlugin;
 
-import java.time.Instant;
+import java.time.Clock;
 import java.util.ArrayDeque;
+import java.util.Collections;
 import java.util.Deque;
+import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -28,25 +32,44 @@ public final class AbuseMonitor {
     private record Sample(long time, double amount) {
     }
 
+    private record AccountAge(long firstPlayed, long playtimeTicks) {
+    }
+
+    private static final int AGE_CACHE_SIZE = 10_000;
+
     private final JavaPlugin plugin;
     private final Ledger ledger;
     private final Alerter alerter;
-    /** Players already alerted on this session — keeps the per-event fast path off the database. */
-    private final java.util.Set<UUID> alertedThisSession = ConcurrentHashMap.newKeySet();
+    // "uuid:type" flags whose save is still in flight, so a burst of events can't write the same flag twice.
+    private final Set<String> pendingFlags = ConcurrentHashMap.newKeySet();
     private final Map<UUID, Deque<Sample>> velocityWindows = new ConcurrentHashMap<>();
     private final Map<String, Deque<Sample>> pairWindows = new ConcurrentHashMap<>();
-    // Cache of immutable first-played timestamps for OFFLINE uuids, to avoid repeated disk lookups on
-    // the per-event hot path. Online players read straight off the live Player object (already cached).
-    private final Map<UUID, Long> firstPlayedCache = new ConcurrentHashMap<>();
+    // Offline accounts only (online players are read live). Filled on quit and by an async read, since
+    // an OfflinePlayer lookup reads playerdata and stats files from disk.
+    private final Map<UUID, AccountAge> offlineAges = Collections.synchronizedMap(
+            new LinkedHashMap<>(256, 0.75f, true) {
+                @Override
+                protected boolean removeEldestEntry(Map.Entry<UUID, AccountAge> eldest) {
+                    return size() > AGE_CACHE_SIZE;
+                }
+            });
+    private final Set<UUID> loadingAges = ConcurrentHashMap.newKeySet();
+
+    private final Clock clock;
 
     public AbuseMonitor(JavaPlugin plugin, Ledger ledger, Alerter alerter) {
+        this(plugin, ledger, alerter, Clock.systemUTC());
+    }
+
+    AbuseMonitor(JavaPlugin plugin, Ledger ledger, Alerter alerter, Clock clock) {
         this.plugin = plugin;
         this.ledger = ledger;
         this.alerter = alerter;
+        this.clock = clock;
     }
 
     public void analyze(MoneyEvent event) {
-        long now = Instant.now().getEpochSecond();
+        long now = clock.instant().getEpochSecond();
         String symbol = plugin.getConfig().getString("currency-symbol", "$");
 
         // 1. Large single transaction (informational alert, any account).
@@ -101,23 +124,40 @@ public final class AbuseMonitor {
         }
     }
 
-    public void clearVelocity(UUID uuid) {
-        velocityWindows.remove(uuid);
-    }
-
     /**
      * Drops window entries whose samples have all aged out, bounding memory. pairWindows is keyed by
      * (payer,receiver) pairs that are never tied to a session, so without this sweep it would grow
      * unbounded. Runs on the main thread (scheduled by the plugin).
      */
     public void sweep() {
-        long now = Instant.now().getEpochSecond();
+        long now = clock.instant().getEpochSecond();
         long velocitySeconds = Math.max(1L, plugin.getConfig().getLong("detection.velocity.window-minutes", 30L)) * 60L;
         long pairSeconds = Math.max(1L, plugin.getConfig().getLong("detection.counterparty.window-minutes", 60L)) * 60L;
         pruneStale(velocityWindows, now, velocitySeconds);
         pruneStale(pairWindows, now, pairSeconds);
-        // The first-played cache holds immutable values; clearing it just drops a perf cache (rebuilt on demand).
-        firstPlayedCache.clear();
+    }
+
+    /** Remembers a leaving player's age so later payments to them while offline need no disk read. */
+    public void rememberAge(Player player) {
+        offlineAges.put(player.getUniqueId(), ageOf(player));
+    }
+
+    private static AccountAge ageOf(OfflinePlayer player) {
+        long firstPlayed = player.getFirstPlayed();
+        return new AccountAge(firstPlayed, firstPlayed > 0L ? player.getStatistic(Statistic.PLAY_ONE_MINUTE) : 0L);
+    }
+
+    private void loadAgeAsync(UUID uuid) {
+        if (!loadingAges.add(uuid)) {
+            return;
+        }
+        plugin.getServer().getScheduler().runTaskAsynchronously(plugin, () -> {
+            try {
+                offlineAges.put(uuid, ageOf(Bukkit.getOfflinePlayer(uuid)));
+            } finally {
+                loadingAges.remove(uuid);
+            }
+        });
     }
 
     private static <K> void pruneStale(Map<K, Deque<Sample>> windows, long now, long windowSeconds) {
@@ -132,27 +172,24 @@ public final class AbuseMonitor {
     }
 
     private void raise(UUID uuid, String name, String type, String reason) {
-        // This runs inside the money-event handler, i.e. on the server thread inside another plugin's
-        // transaction. It used to do a SELECT plus an UPSERT here (and the collusion branch calls
-        // raise() twice, so four blocking round trips per event). Now the main thread only does an
-        // O(1) set insert; the database work happens off-thread.
-        //
-        // The set doubles as the "don't spam alerts" guard: add() is atomic, so only the first caller
-        // for a given player proceeds. It is per-session, so the authoritative isFlagged() check below
-        // still runs off-thread to cover players already flagged before a restart.
-        if (!alertedThisSession.add(uuid)) {
+        // Dedup on the flag cache (loaded from the database, cleared with the flag), so clearing a flag
+        // re-arms detection. The pending key only covers the gap until the async save lands.
+        String key = uuid + ":" + type;
+        if (ledger.isFlaggedFast(uuid, type) || !pendingFlags.add(key)) {
             return;
         }
         String safeName = safe(name);
-        long now = Instant.now().getEpochSecond();
+        long now = clock.instant().getEpochSecond();
         plugin.getServer().getScheduler().runTaskAsynchronously(plugin, () -> {
-            if (ledger.isFlagged(uuid)) {
-                return;                          // already on record from a previous session
+            try {
+                if (ledger.saveFlag(new Flag(uuid, safeName, type, reason, now))) {
+                    plugin.getServer().getScheduler().runTask(plugin, () ->
+                            alerter.alert("&4[EconGuard] FLAGGED &e" + safeName + " &7- " + reason
+                                    + ". &7Review: &f/econguard history " + safeName));
+                }
+            } finally {
+                pendingFlags.remove(key);
             }
-            ledger.saveFlag(new Flag(uuid, safeName, type, reason, now));
-            plugin.getServer().getScheduler().runTask(plugin, () ->
-                    alerter.alert("&4[EconGuard] FLAGGED &e" + safeName + " &7- " + reason
-                            + ". &7Review: &f/econguard history " + safeName));
         });
     }
 
@@ -160,24 +197,19 @@ public final class AbuseMonitor {
         long maxAgeDays = Math.max(0L, plugin.getConfig().getLong("young-account.max-age-days", 3L));
         long maxPlaytimeHours = Math.max(0L, plugin.getConfig().getLong("young-account.max-playtime-hours", 10L));
 
-        // Prefer the live Player: getFirstPlayed() and getStatistic() are in-memory (no disk hit). Only
-        // fall back to a (cached) OfflinePlayer lookup for an offline uuid, e.g. an offline counterparty.
         Player online = Bukkit.getPlayer(uuid);
-        long firstPlayed = online != null
-                ? online.getFirstPlayed()
-                : firstPlayedCache.computeIfAbsent(uuid, id -> Bukkit.getOfflinePlayer(id).getFirstPlayed());
-
-        if (firstPlayed <= 0L) {
+        AccountAge age = online != null ? ageOf(online) : offlineAges.get(uuid);
+        if (age == null) {
+            loadAgeAsync(uuid);
+            return true; // unknown until the async read lands; young is the safe side
+        }
+        if (age.firstPlayed() <= 0L) {
             return true; // never seen before / unknown -> treat as brand new
         }
-        if ((System.currentTimeMillis() - firstPlayed) / 86_400_000L < maxAgeDays) {
+        if ((clock.millis() - age.firstPlayed()) / 86_400_000L < maxAgeDays) {
             return true;
         }
-        if (online != null) {
-            long playtimeHours = online.getStatistic(Statistic.PLAY_ONE_MINUTE) / 20L / 3600L;
-            return playtimeHours < maxPlaytimeHours;
-        }
-        return false;
+        return age.playtimeTicks() / 20L / 3600L < maxPlaytimeHours;
     }
 
     private static double windowSum(Deque<Sample> window, long now, long windowSeconds, double newAmount) {

@@ -74,7 +74,7 @@ public final class EconGuardPlugin extends JavaPlugin implements Listener {
     @EventHandler
     public void onPlayerQuit(PlayerQuitEvent event) {
         if (monitor != null) {
-            monitor.clearVelocity(event.getPlayer().getUniqueId());
+            monitor.rememberAge(event.getPlayer());
         }
     }
 
