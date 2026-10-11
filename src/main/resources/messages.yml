@@ -1,0 +1,73 @@
+# EconGuard messages. Colour codes use &. Placeholders look like %player%.
+# A key missing from this file falls back to the plugin's built-in default.
+# Set a chat line to "" to hide it.
+
+no-permission: "&cYou do not have permission to use EconGuard."
+reloaded: "&aEconGuard config reloaded."
+limit-not-number: "&cLimit must be a number."
+
+# /econguard with no or an unknown subcommand.
+help:
+  - "&eEconGuard commands:"
+  - "&7/econguard flags [clear [player]]"
+  - "&7/econguard history <player> [limit]"
+  - "&7/econguard pair <player> <player> [limit]"
+  - "&7/econguard stats"
+  - "&7/econguard reload"
+
+flags:
+  cleared-one: "&aCleared flag for %player%."
+  not-found: "&eNo flag found for %player%."
+  cleared-all: "&aCleared all flags."
+  empty: "&aNo anti-abuse flags. All clear."
+  header: "&eEconGuard flags (%count%): &7/econguard flags clear [player]"
+  # %reason% is the reason saved with the flag when it was raised.
+  line: "&c• &e%player% &8[%type%] &7%reason% &8(%minutes%m ago)"
+
+history:
+  usage: "&cUsage: /econguard history <player> [limit]"
+  empty: "&eNo ledger history for %player%."
+  header: "&eLedger for %player% (%count%):"
+  # %direction% is incoming or outgoing below; %counterparty% and %item% are empty when not set.
+  line: "&7%direction%%amount% &8| &f%source%/%action%%counterparty%%item%"
+  incoming: "&a+"
+  outgoing: "&c-"
+  counterparty: " &8(%name%)"
+  item: " &8[%item%]"
+
+pair:
+  usage: "&cUsage: /econguard pair <player> <player> [limit]"
+  empty: "&eNo ledger entries between %first% and %second%."
+  header: "&eLedger between &f%first% &eand &f%second%&e:"
+  received: "&7  %player% received &f%amount% &7in &f%count%&7 transfer(s)"
+  received-nothing: "&7  %player% received: &fnothing"
+  # %direction% is incoming or outgoing below; %item% is empty when not set.
+  line: "&7%direction%&f%player% &7%action% %amount% &8| &f%source%%item%"
+  incoming: "&a→ "
+  outgoing: "&c← "
+  item: " &8[%item%]"
+
+stats:
+  header: "&eEconGuard stats:"
+  ledger-rows: "&7  Ledger rows: &f%rows%"
+  # shown as %rows% when the ledger could not be counted
+  ledger-rows-unknown: "?"
+  pending-flags: "&7  Pending flags: &f%count%"
+  type-line: "&8    - %type%: &f%count%"
+
+# Sent to online players with econguard.alerts (and logged to the console and the webhook without colours).
+alerts:
+  join-pending: "&c[EconGuard] &e%count% player(s) flagged for review. &7/econguard flags"
+  # %party% is large-transaction-party below, or empty when there is no other player.
+  large-transaction: "&c[EconGuard] &e%player% &7%action% &f%amount% &7via %source%%party%"
+  large-transaction-party: " &7(party: &f%counterparty%&7)"
+  # %reason% is one of the reasons below.
+  flagged: "&4[EconGuard] FLAGGED &e%player% &7- %reason%. &7Review: &f/econguard history %player%"
+
+# Reasons shown in the flagged alert. /econguard flags lists the reason saved with the flag,
+# which keeps the wording it had when it was raised.
+reasons:
+  young-incoming: "New account received %amount% from %counterparty% via %source%"
+  velocity: "New account gained %amount% within %minutes%m"
+  collusion-received: "Received: %amount% moved %payer% -> %receiver% within %minutes%m (possible collusion)"
+  collusion-sent: "Sent: %amount% moved %payer% -> %receiver% within %minutes%m (possible collusion)"

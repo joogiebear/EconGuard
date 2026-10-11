@@ -75,7 +75,7 @@ Base command `/econguard`, aliases **`/eg`**, `/econ`.
 | `/eg flags clear [player]` | Clear all flags, or one player's |
 | `/eg history <player> [limit]` | That player's unified money history across every source |
 | `/eg stats` | Ledger size, flag count, detection status |
-| `/eg reload` | Reload `config.yml` |
+| `/eg reload` | Reload `config.yml` and `messages.yml` |
 
 | Node | Default | |
 |---|---|---|
@@ -112,6 +112,8 @@ detection:
     window-minutes: 60
     threshold: 500000000.0
 ```
+
+All chat text (command output, staff alerts and the flag reasons shown in alerts) is in `messages.yml`. A key missing from your copy uses the plugin's built-in default.
 
 ## The detection signals
 

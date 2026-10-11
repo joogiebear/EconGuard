@@ -3,6 +3,7 @@ package com.mystipixel.econguard.service;
 import com.mystipixel.econguard.api.Flag;
 import com.mystipixel.econguard.api.MoneyEvent;
 import com.mystipixel.econguard.data.Ledger;
+import com.mystipixel.econguard.message.MessageManager;
 import com.mystipixel.econguard.util.Text;
 import org.bukkit.Bukkit;
 import org.bukkit.OfflinePlayer;
@@ -37,6 +38,7 @@ public final class AbuseMonitor {
     private final JavaPlugin plugin;
     private final Ledger ledger;
     private final Alerter alerter;
+    private final MessageManager messages;
     // "uuid:type" flags whose save is still in flight, so a burst of events can't write the same flag twice.
     private final Set<String> pendingFlags = ConcurrentHashMap.newKeySet();
     private final Map<UUID, Deque<Sample>> velocityWindows = new ConcurrentHashMap<>();
@@ -54,14 +56,15 @@ public final class AbuseMonitor {
 
     private final Clock clock;
 
-    public AbuseMonitor(JavaPlugin plugin, Ledger ledger, Alerter alerter) {
-        this(plugin, ledger, alerter, Clock.systemUTC());
+    public AbuseMonitor(JavaPlugin plugin, Ledger ledger, Alerter alerter, MessageManager messages) {
+        this(plugin, ledger, alerter, messages, Clock.systemUTC());
     }
 
-    AbuseMonitor(JavaPlugin plugin, Ledger ledger, Alerter alerter, Clock clock) {
+    AbuseMonitor(JavaPlugin plugin, Ledger ledger, Alerter alerter, MessageManager messages, Clock clock) {
         this.plugin = plugin;
         this.ledger = ledger;
         this.alerter = alerter;
+        this.messages = messages;
         this.clock = clock;
     }
 
@@ -71,9 +74,11 @@ public final class AbuseMonitor {
 
         double largeThreshold = plugin.getConfig().getDouble("detection.large-transaction", 100_000_000.0);
         if (largeThreshold > 0 && event.amount() >= largeThreshold) {
-            alerter.alert("&c[EconGuard] &e" + safe(event.playerName()) + " &7" + event.action() + " &f"
-                    + Text.money(event.amount(), symbol) + " &7via " + event.source()
-                    + (event.hasCounterparty() ? " &7(party: &f" + safe(event.counterpartyName()) + "&7)" : ""));
+            String party = event.hasCounterparty()
+                    ? messages.get("alerts.large-transaction-party", "counterparty", safe(event.counterpartyName())) : "";
+            alerter.alert(messages.get("alerts.large-transaction", "player", safe(event.playerName()),
+                    "action", event.action(), "amount", Text.money(event.amount(), symbol),
+                    "source", event.source(), "party", party));
         }
 
         if (!event.incoming()) {
@@ -83,9 +88,12 @@ public final class AbuseMonitor {
 
         double youngIncoming = plugin.getConfig().getDouble("detection.young-incoming-transfer", 50_000_000.0);
         if (young && event.hasCounterparty() && youngIncoming > 0 && event.amount() >= youngIncoming) {
+            String amount = Text.money(event.amount(), symbol);
+            String counterparty = safe(event.counterpartyName());
             raise(event.player(), event.playerName(), "young-incoming",
-                    "New account received " + Text.money(event.amount(), symbol) + " from "
-                            + safe(event.counterpartyName()) + " via " + event.source());
+                    "New account received " + amount + " from " + counterparty + " via " + event.source(),
+                    messages.get("reasons.young-incoming", "amount", amount, "counterparty", counterparty,
+                            "source", event.source()));
         }
 
         // young accounts only, so no windows build up for veterans
@@ -95,8 +103,10 @@ public final class AbuseMonitor {
             Deque<Sample> window = velocityWindows.computeIfAbsent(event.player(), k -> new ArrayDeque<>());
             double total = windowSum(window, now, windowMinutes * 60L, event.amount());
             if (threshold > 0 && total >= threshold) {
+                String amount = Text.money(total, symbol);
                 raise(event.player(), event.playerName(), "velocity",
-                        "New account gained " + Text.money(total, symbol) + " within " + windowMinutes + "m");
+                        "New account gained " + amount + " within " + windowMinutes + "m",
+                        messages.get("reasons.velocity", "amount", amount, "minutes", String.valueOf(windowMinutes)));
             }
         }
 
@@ -107,10 +117,17 @@ public final class AbuseMonitor {
             Deque<Sample> window = pairWindows.computeIfAbsent(key, k -> new ArrayDeque<>());
             double total = windowSum(window, now, windowMinutes * 60L, event.amount());
             if (threshold > 0 && total >= threshold) {
-                String detail = Text.money(total, symbol) + " moved " + safe(event.counterpartyName())
-                        + " -> " + safe(event.playerName()) + " within " + windowMinutes + "m (possible collusion)";
-                raise(event.player(), event.playerName(), "collusion", "Received: " + detail);
-                raise(event.counterparty(), event.counterpartyName(), "collusion", "Sent: " + detail);
+                String amount = Text.money(total, symbol);
+                String payer = safe(event.counterpartyName());
+                String receiver = safe(event.playerName());
+                String detail = amount + " moved " + payer + " -> " + receiver + " within " + windowMinutes
+                        + "m (possible collusion)";
+                String[] values = {"amount", amount, "payer", payer, "receiver", receiver,
+                        "minutes", String.valueOf(windowMinutes)};
+                raise(event.player(), event.playerName(), "collusion", "Received: " + detail,
+                        messages.get("reasons.collusion-received", values));
+                raise(event.counterparty(), event.counterpartyName(), "collusion", "Sent: " + detail,
+                        messages.get("reasons.collusion-sent", values));
             }
         }
     }
@@ -158,7 +175,8 @@ public final class AbuseMonitor {
         });
     }
 
-    private void raise(UUID uuid, String name, String type, String reason) {
+    // storedReason is kept with the flag as data, in a fixed wording; shownReason is the configured alert text
+    private void raise(UUID uuid, String name, String type, String storedReason, String shownReason) {
         // Dedup on the flag cache (loaded from the database, cleared with the flag), so clearing a flag
         // re-arms detection. The pending key only covers the gap until the async save lands.
         String key = uuid + ":" + type;
@@ -169,10 +187,9 @@ public final class AbuseMonitor {
         long now = clock.instant().getEpochSecond();
         plugin.getServer().getScheduler().runTaskAsynchronously(plugin, () -> {
             try {
-                if (ledger.saveFlag(new Flag(uuid, safeName, type, reason, now))) {
-                    plugin.getServer().getScheduler().runTask(plugin, () ->
-                            alerter.alert("&4[EconGuard] FLAGGED &e" + safeName + " &7- " + reason
-                                    + ". &7Review: &f/econguard history " + safeName));
+                if (ledger.saveFlag(new Flag(uuid, safeName, type, storedReason, now))) {
+                    plugin.getServer().getScheduler().runTask(plugin, () -> alerter.alert(
+                            messages.get("alerts.flagged", "player", safeName, "reason", shownReason)));
                 }
             } finally {
                 pendingFlags.remove(key);

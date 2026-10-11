@@ -1,7 +1,10 @@
 package com.mystipixel.econguard.service;
 
+import com.mystipixel.econguard.api.Flag;
 import com.mystipixel.econguard.api.MoneyEvent;
 import com.mystipixel.econguard.data.Ledger;
+import com.mystipixel.econguard.message.MessageManager;
+import com.mystipixel.econguard.message.TestMessages;
 import org.bukkit.Bukkit;
 import org.bukkit.OfflinePlayer;
 import org.bukkit.Server;
@@ -24,6 +27,7 @@ import java.time.ZoneOffset;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.Statement;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.logging.Logger;
@@ -53,6 +57,7 @@ class AbuseMonitorTest {
     private YamlConfiguration config;
     private Ledger ledger;
     private Alerter alerter;
+    private MessageManager messages;
     private AbuseMonitor monitor;
     private MockedStatic<Bukkit> bukkit;
     private BukkitScheduler scheduler;
@@ -84,7 +89,8 @@ class AbuseMonitorTest {
         ledger = new Ledger(plugin);
         assertTrue(ledger.connect());
         alerter = mock(Alerter.class);
-        monitor = new AbuseMonitor(plugin, ledger, alerter, clock);
+        messages = TestMessages.bundled(folder.resolve("messages").toFile());
+        monitor = new AbuseMonitor(plugin, ledger, alerter, messages, clock);
     }
 
     @AfterEach
@@ -118,6 +124,34 @@ class AbuseMonitorTest {
     }
 
     @Test
+    void flagAlertsShowTheSavedReasonInTheWordingUsedBefore() {
+        config.set("detection.velocity.threshold", 400.0);
+        config.set("detection.counterparty.threshold", 450.0);
+        monitor.analyze(transfer(500));
+
+        List<Flag> flags = ledger.getFlags();
+        assertEquals(4, flags.size(), "young-incoming, velocity and collusion for both sides");
+        for (Flag flag : flags) {
+            verify(alerter).alert("&4[EconGuard] FLAGGED &e" + flag.playerName() + " &7- " + flag.reason()
+                    + ". &7Review: &f/econguard history " + flag.playerName());
+        }
+        assertTrue(flags.stream().anyMatch(f -> f.reason().equals("New account received $500.00 from payer via bank")));
+        assertTrue(flags.stream().anyMatch(f -> f.reason().equals("New account gained $500.00 within 30m")));
+        assertTrue(flags.stream().anyMatch(f -> f.reason().equals(
+                "Received: $500.00 moved payer -> alt within 60m (possible collusion)")));
+        assertTrue(flags.stream().anyMatch(f -> f.reason().equals(
+                "Sent: $500.00 moved payer -> alt within 60m (possible collusion)")));
+    }
+
+    @Test
+    void largeTransactionAlertKeepsItsWording() {
+        config.set("detection.large-transaction", 100.0);
+        monitor.analyze(transfer(500));
+
+        verify(alerter).alert("&c[EconGuard] &ealt &7transfer-received &f$500.00 &7via bank &7(party: &fpayer&7)");
+    }
+
+    @Test
     void anExistingFlagIsNotRaisedTwice() {
         monitor.analyze(transfer(500));
         monitor.analyze(transfer(500));
@@ -140,7 +174,7 @@ class AbuseMonitorTest {
     void aFailedSaveIsRetriedOnTheNextEvent() {
         Ledger failing = mock(Ledger.class);
         when(failing.saveFlag(any())).thenReturn(false, true);
-        AbuseMonitor flaky = new AbuseMonitor(plugin, failing, alerter);
+        AbuseMonitor flaky = new AbuseMonitor(plugin, failing, alerter, messages);
 
         flaky.analyze(transfer(500));
         verify(alerter, never()).alert(anyString());
@@ -166,7 +200,7 @@ class AbuseMonitorTest {
 
         assertTrue(ledger.isFlaggedFast(alt, "velocity"));
         assertFalse(ledger.isFlaggedFast(alt, "collusion"));
-        monitor = new AbuseMonitor(plugin, ledger, alerter, clock);
+        monitor = new AbuseMonitor(plugin, ledger, alerter, messages, clock);
         monitor.analyze(transfer(500));
         assertEquals(2, ledger.getFlags().size());
     }
