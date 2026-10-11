@@ -42,7 +42,7 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-/** Flag dedup against a real SQLite ledger, with Bukkit's scheduler running tasks inline. */
+// flag dedup against a real SQLite ledger, with Bukkit's scheduler running tasks inline
 class AbuseMonitorTest {
     @TempDir
     Path folder;

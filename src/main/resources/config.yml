@@ -1,9 +1,5 @@
-# EconGuard - shared economy audit + anti-abuse / RMT detection core.
-#
-# Other plugins (RoyalBank, an auction house, a /pay bridge, shops) report every money movement here.
-# EconGuard keeps a single unified ledger and runs cross-flow anti-abuse analysis on top of it.
-# It cannot prevent real-money trading (that is an out-of-game agreement) - it surfaces suspicious
-# patterns for staff to review, and gives you one audit trail for bans/rollbacks.
+# EconGuard: shared economy audit and anti-abuse core. Other plugins report money movements here;
+# EconGuard keeps one ledger and flags suspicious patterns for staff to review.
 
 # Currency symbol used only for formatting alert/console messages.
 currency-symbol: "$"
@@ -14,8 +10,7 @@ notify-staff: true
 # Optional Discord webhook for alerts and flags. Leave blank to disable.
 discord-webhook: ""
 
-# Storage backend. SQLITE (default, single server) or MYSQL (a shared audit DB across servers -
-# the recommended setup for a network, so every server reports into one ledger).
+# Storage backend: SQLITE (default, single server) or MYSQL (one shared ledger for a network).
 storage:
   type: SQLITE
   sqlite-file: "econguard.db"
@@ -32,20 +27,16 @@ database:
   # Keep at most this many ledger rows per player (pruned on startup). 0 = unlimited.
   max-rows-per-player: 500
 
-# "Young account" definition. The velocity and large-incoming signals only flag young accounts,
-# so a veteran who legitimately sells a lucky drop is NOT flagged - only wealth that arrives with
-# little to no time invested (the real RMT fingerprint).
+# The velocity and young-incoming signals only flag young accounts, so veterans selling a lucky drop aren't flagged.
 young-account:
   max-age-days: 3          # account first joined within this many days counts as young
   max-playtime-hours: 10   # OR online playtime below this many hours counts as young
 
 # Enforcement. Detection only ever raises flags; this decides what a flag DOES.
 enforcement:
-  # true  - feature plugins that consult EconGuard before a trade (RoyalBazaar, RoyalTrade)
-  #         refuse trades from flagged players until the flag is cleared with /econguard flags clear.
-  # false - flags are alert-only: staff review them, nothing is blocked. The default, because
-  #         a false positive that locks a legitimate player out of the economy is worse than a
-  #         few hours of a real abuser trading while staff catch up.
+  # true: plugins that check EconGuard before a trade (RoyalBazaar, RoyalTrade) refuse trades from
+  #       flagged players until the flag is cleared with /econguard flags clear.
+  # false (default): flags are alert-only, so a false positive never locks a legitimate player out.
   block-flagged-trades: false
 
 detection:

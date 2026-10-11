@@ -23,13 +23,9 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.logging.Level;
 
 /**
- * Unified ledger plus the persisted flag registry, over one HikariCP data source that serves both
- * SQLite (default, single server) and MySQL (networks / a shared audit DB across servers).
- *
- * <p>Audit rows are append-only, so {@link #record} just enqueues and a background {@link #flush}
- * batches the inserts — keeping high-volume audit writes off the main thread. The JDBC driver and the
- * connection pool are delivered by Paper's library loader (see plugin.yml {@code libraries}); nothing
- * is shaded into the jar.
+ * Audit ledger and flag registry over one HikariCP pool, SQLite or MySQL. {@link #record} only enqueues;
+ * a background {@link #flush} batches the inserts. The driver and pool come from Paper's library loader
+ * (plugin.yml {@code libraries}), nothing is shaded.
  */
 public final class Ledger {
 
@@ -58,11 +54,8 @@ public final class Ledger {
     private final JavaPlugin plugin;
     private final Queue<Queued> writeQueue = new ConcurrentLinkedQueue<>();
 
-    /**
-     * In-memory mirror of the flags table (player id to flag types), loaded at connect and maintained
-     * by every flag write. It exists so the per-trade veto ({@code allowTrade}) is an O(1) lookup on the
-     * main thread instead of a blocking query inside another plugin's transaction.
-     */
+    // mirror of the flags table, so allowTrade is an O(1) lookup instead of a query inside another
+    // plugin's transaction
     private final java.util.Map<UUID, java.util.Set<String>> flaggedCache = new java.util.concurrent.ConcurrentHashMap<>();
 
     private Type type;
@@ -71,8 +64,6 @@ public final class Ledger {
     public Ledger(JavaPlugin plugin) {
         this.plugin = plugin;
     }
-
-    // ------------------------------------------------------------------ lifecycle
 
     public boolean connect() {
         try {
@@ -113,8 +104,7 @@ public final class Ledger {
                 hikari.setDriverClassName("org.sqlite.JDBC");
                 // One connection: SQLite is single-writer, so a pool of 1 avoids SQLITE_BUSY entirely.
                 hikari.setMaximumPoolSize(SqliteSettings.POOL_SIZE);
-                // Driver properties, not connectionInitSql: sqlite-jdbc prepares only the first statement
-                // of a multi-statement init string, so synchronous and busy_timeout were being dropped.
+                // driver properties, not connectionInitSql: sqlite-jdbc runs only the first statement of that string
                 hikari.setDataSourceProperties(SqliteSettings.properties());
             }
 
@@ -242,13 +232,8 @@ public final class Ledger {
         }
     }
 
-    /**
-     * Tables created before utf8mb4 was declared took the server's default charset, which on MySQL 5.7
-     * and MariaDB is often latin1 or utf8mb3. An item name with an emoji or other four-byte character
-     * then fails its insert in strict mode, and the whole batch rolls back with it. Converting copies the
-     * table, so it can take a while on a large ledger; it happens once. A failure is logged, not fatal:
-     * the ledger still works for everything the old charset can hold.
-     */
+    // Older tables may use latin1/utf8mb3, where a 4-byte character fails its insert and rolls back the
+    // whole batch. The conversion copies the table (slow on a big ledger, runs once); failure is not fatal.
     private void convertToUtf8mb4(List<String> tables) {
         String query = "SELECT TABLE_NAME, TABLE_COLLATION FROM information_schema.TABLES "
                 + "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?";
@@ -276,8 +261,6 @@ public final class Ledger {
             }
         }
     }
-
-    // ------------------------------------------------------------------ writes (append-only, batched)
 
     /** Enqueues an audit row. Thread-safe and non-blocking; the row is persisted by the next flush. */
     public void record(MoneyEvent event) {
@@ -336,8 +319,6 @@ public final class Ledger {
         statement.setString(11, event.note());
         statement.setLong(12, createdAt);
     }
-
-    // ------------------------------------------------------------------ reads
 
     public List<MoneyEvent> recent(UUID uuid, int limit) {
         flush(); // ensure just-enqueued rows are visible to history queries
@@ -450,8 +431,6 @@ public final class Ledger {
             return -1L;
         }
     }
-
-    // ------------------------------------------------------------------ flags
 
     private void loadFlagCache() {
         flaggedCache.clear();
@@ -567,8 +546,6 @@ public final class Ledger {
         }
     }
 
-    // ------------------------------------------------------------------ maintenance
-
     /** Prunes old ledger rows beyond the per-player cap. The window function runs on SQLite 3.25+/MySQL 8+. */
     public int prune(int maxPerPlayer) {
         if (maxPerPlayer <= 0) {
@@ -597,7 +574,7 @@ public final class Ledger {
 
     // synchronized so it cannot interleave with a background flush().
     public synchronized void close() {
-        flush(); // drain anything still queued before shutting down
+        flush();
         if (dataSource == null) {
             return;
         }
@@ -606,7 +583,6 @@ public final class Ledger {
                  Statement statement = connection.createStatement()) {
                 statement.execute("PRAGMA wal_checkpoint(TRUNCATE)");
             } catch (SQLException ignored) {
-                // best effort
             }
         }
         dataSource.close();

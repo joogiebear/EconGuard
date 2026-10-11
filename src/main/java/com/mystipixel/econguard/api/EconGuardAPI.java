@@ -30,7 +30,7 @@ public interface EconGuardAPI {
     /**
      * The pre-trade policy check: false means this player's trades should be refused right now.
      * Returns false only when the player is flagged AND {@code enforcement.block-flagged-trades} is
-     * on — with enforcement off (the default) flags stay alert-only and this always permits.
+     * on. With enforcement off (the default) flags stay alert-only and this always permits.
      */
     boolean allowTrade(UUID player);
 }
