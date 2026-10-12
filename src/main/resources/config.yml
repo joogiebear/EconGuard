@@ -10,7 +10,8 @@ notify-staff: true
 # Optional Discord webhook for alerts and flags. Leave blank to disable.
 discord-webhook: ""
 
-# Storage backend: SQLITE (default, single server) or MYSQL (one shared ledger for a network).
+# Storage backend: SQLITE (default) or MYSQL. Each server needs its own database for now: sharing one
+# between servers is planned but not safe yet, because servers can overwrite each other's data.
 storage:
   type: SQLITE
   sqlite-file: "econguard.db"
