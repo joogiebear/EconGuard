@@ -1,6 +1,6 @@
 # EconGuard
 
-**Shared economy audit ledger and anti-abuse / RMT-detection core** for Paper. Requires Paper 26.2 or newer.
+**Economy audit ledger shared by a server's plugins, and anti-abuse / RMT-detection core** for Paper. Requires Paper 26.2 or newer.
 
 EconGuard doesn't move money and has no player-facing features. It's the piece the *other* economy
 plugins report to: one ledger, one place to look, one audit trail for a ban or rollback.
@@ -207,6 +207,10 @@ Add it as a `provided` dependency and `softdepend: [EconGuard]` in your `plugin.
 
 SQLite (`econguard.db`). Two tables: the money ledger and the flag list. Writes are async; the ledger
 is pruned to `max-rows-per-player` on startup so it can't grow unbounded on a long-lived server.
+
+MySQL is supported, but each server needs its own database for now. Sharing one database between
+servers (a hub and island servers, say) is planned and not safe yet, because two servers can overwrite
+each other's data.
 
 ## Building
 

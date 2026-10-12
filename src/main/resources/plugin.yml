@@ -3,7 +3,7 @@ version: ${version}
 main: com.mystipixel.econguard.EconGuardPlugin
 api-version: '26.2'
 author: Mystipixel
-description: Shared economy audit ledger and anti-abuse / RMT detection core.
+description: Economy audit ledger shared by a server's plugins, and anti-abuse / RMT detection core.
 # JDBC drivers + connection pool are downloaded at runtime by Paper's library loader.
 # Keep these versions identical to the matching dependencies in pom.xml.
 libraries:
