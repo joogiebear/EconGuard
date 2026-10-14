@@ -87,6 +87,24 @@ class SharedLedgerTest {
     }
 
     @Test
+    void pruningKeepsTheNewestRowsPerPlayerOnEveryPass() {
+        Ledger a = sqlite("a");
+        UUID other = UUID.randomUUID();
+        for (int i = 0; i < 5; i++) {
+            a.record(payment(i + 1, payer));
+        }
+        a.record(MoneyEvent.builder(other, "other").source("bank").action("deposit").amount(1).build());
+        assertEquals(3, a.prune(2));
+        assertEquals(List.of(5.0, 4.0), a.recent(alt, 10).stream().map(MoneyEvent::amount).toList());
+        for (int i = 6; i < 9; i++) {
+            a.record(payment(i, payer));
+        }
+        assertEquals(3, a.prune(2), "a later pass covers the players with new rows");
+        assertEquals(List.of(8.0, 7.0), a.recent(alt, 10).stream().map(MoneyEvent::amount).toList());
+        assertEquals(1, a.recent(other, 10).size());
+    }
+
+    @Test
     @EnabledIfEnvironmentVariable(named = "EG_TEST_MYSQL_PORT", matches = "[0-9]+")
     void onMySqlFlagsAndPaymentsAreShared() throws Exception {
         String database = freshDatabase();
