@@ -74,6 +74,7 @@ class AbuseMonitorTest {
         when(plugin.getConfig()).thenReturn(config);
         when(plugin.getDataFolder()).thenReturn(folder.toFile());
         when(plugin.getLogger()).thenReturn(Logger.getLogger("test"));
+        when(plugin.isEnabled()).thenReturn(true);
         Server server = mock(Server.class);
         scheduler = mock(BukkitScheduler.class);
         when(plugin.getServer()).thenReturn(server);
@@ -173,7 +174,7 @@ class AbuseMonitorTest {
     @Test
     void aFailedSaveIsRetriedOnTheNextEvent() {
         Ledger failing = mock(Ledger.class);
-        when(failing.saveFlag(any())).thenReturn(false, true);
+        when(failing.saveFlag(any())).thenReturn(Ledger.FlagSave.FAILED, Ledger.FlagSave.CREATED);
         AbuseMonitor flaky = new AbuseMonitor(plugin, failing, alerter, messages);
 
         flaky.analyze(transfer(500));
@@ -185,11 +186,49 @@ class AbuseMonitorTest {
     }
 
     @Test
+    void aFlagAnotherServerAlreadySavedIsNotAnnouncedAgain() {
+        Ledger shared = mock(Ledger.class);
+        when(shared.saveFlag(any())).thenReturn(Ledger.FlagSave.EXISTING);
+        new AbuseMonitor(plugin, shared, alerter, messages).analyze(transfer(500));
+
+        verify(shared).saveFlag(any());
+        verify(alerter, never()).alert(contains("FLAGGED"));
+    }
+
+    @Test
+    void onASharedDatabasePaymentsFromOtherServersCountTowardsVelocity() {
+        config.set("detection.young-incoming-transfer", 0);
+        config.set("detection.velocity.threshold", 1000.0);
+        Ledger shared = mock(Ledger.class);
+        when(shared.shared()).thenReturn(true);
+        when(shared.saveFlag(any())).thenReturn(Ledger.FlagSave.CREATED);
+        // 500 here, 700 recorded on another server
+        when(shared.receivedSince(eq(alt), eq(null), org.mockito.ArgumentMatchers.anyLong())).thenReturn(1200.0);
+        new AbuseMonitor(plugin, shared, alerter, messages, clock).analyze(transfer(500));
+
+        verify(shared).saveFlag(org.mockito.ArgumentMatchers.argThat(f -> f.type().equals("velocity")
+                && f.reason().startsWith("New account gained $1") && f.reason().endsWith("200.00 within 30m")));
+    }
+
+    @Test
+    void onOneServerOnlyItsOwnWindowCounts() {
+        config.set("detection.young-incoming-transfer", 0);
+        config.set("detection.velocity.threshold", 1000.0);
+        Ledger single = mock(Ledger.class);
+        new AbuseMonitor(plugin, single, alerter, messages, clock).analyze(transfer(500));
+
+        verify(single, never()).receivedSince(any(), any(), org.mockito.ArgumentMatchers.anyLong());
+        verify(single, never()).saveFlag(any());
+    }
+
+    @Test
     void anOldOneFlagPerPlayerTableIsMigrated() throws Exception {
         ledger.close();
         Path db = folder.resolve("econguard.db");
         try (Connection c = DriverManager.getConnection("jdbc:sqlite:" + db);
              Statement st = c.createStatement()) {
+            // an install from before the schema version table
+            st.executeUpdate("DROP TABLE econguard_schema_version");
             st.executeUpdate("DROP TABLE flags");
             st.executeUpdate("CREATE TABLE flags (uuid TEXT PRIMARY KEY, username TEXT, type TEXT NOT NULL,"
                     + " reason TEXT NOT NULL, created_at INTEGER NOT NULL)");

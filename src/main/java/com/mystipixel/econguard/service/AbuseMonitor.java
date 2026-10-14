@@ -56,16 +56,50 @@ public final class AbuseMonitor {
 
     private final Clock clock;
 
+    // Cross-server window checks: a few threads and a bounded queue, so a burst of payments can't start a
+    // thread or a query each. A check dropped when the queue is full runs again with the next payment.
+    private final java.util.concurrent.Executor checks;
+    private final Set<String> checking = ConcurrentHashMap.newKeySet();
+
     public AbuseMonitor(JavaPlugin plugin, Ledger ledger, Alerter alerter, MessageManager messages) {
-        this(plugin, ledger, alerter, messages, Clock.systemUTC());
+        this(plugin, ledger, alerter, messages, Clock.systemUTC(), checkPool());
     }
 
+    // tests: checks run inline
     AbuseMonitor(JavaPlugin plugin, Ledger ledger, Alerter alerter, MessageManager messages, Clock clock) {
+        this(plugin, ledger, alerter, messages, clock, Runnable::run);
+    }
+
+    AbuseMonitor(JavaPlugin plugin, Ledger ledger, Alerter alerter, MessageManager messages, Clock clock,
+                 java.util.concurrent.Executor checks) {
         this.plugin = plugin;
         this.ledger = ledger;
         this.alerter = alerter;
         this.messages = messages;
         this.clock = clock;
+        this.checks = checks;
+    }
+
+    private static java.util.concurrent.ThreadPoolExecutor checkPool() {
+        java.util.concurrent.ThreadPoolExecutor pool = new java.util.concurrent.ThreadPoolExecutor(2, 2,
+                30L, java.util.concurrent.TimeUnit.SECONDS, new java.util.concurrent.ArrayBlockingQueue<>(256),
+                runnable -> {
+                    Thread thread = new Thread(runnable, "EconGuard-window-check");
+                    thread.setDaemon(true);
+                    return thread;
+                },
+                (dropped, executor) -> {
+                    throw new java.util.concurrent.RejectedExecutionException("window checks are busy");
+                });
+        pool.allowCoreThreadTimeOut(true);
+        return pool;
+    }
+
+    /** Stops the cross-server checks. Call on disable. */
+    public void close() {
+        if (checks instanceof java.util.concurrent.ExecutorService pool) {
+            pool.shutdownNow();
+        }
     }
 
     public void analyze(MoneyEvent event) {
@@ -103,10 +137,10 @@ public final class AbuseMonitor {
             Deque<Sample> window = velocityWindows.computeIfAbsent(event.player(), k -> new ArrayDeque<>());
             double total = windowSum(window, now, windowMinutes * 60L, event.amount());
             if (threshold > 0 && total >= threshold) {
-                String amount = Text.money(total, symbol);
-                raise(event.player(), event.playerName(), "velocity",
-                        "New account gained " + amount + " within " + windowMinutes + "m",
-                        messages.get("reasons.velocity", "amount", amount, "minutes", String.valueOf(windowMinutes)));
+                raiseVelocity(event, total, windowMinutes, symbol);
+            } else if (threshold > 0) {
+                acrossServers(event.player(), null, "velocity", now - windowMinutes * 60L, threshold,
+                        sum -> raiseVelocity(event, sum, windowMinutes, symbol));
             }
         }
 
@@ -117,18 +151,63 @@ public final class AbuseMonitor {
             Deque<Sample> window = pairWindows.computeIfAbsent(key, k -> new ArrayDeque<>());
             double total = windowSum(window, now, windowMinutes * 60L, event.amount());
             if (threshold > 0 && total >= threshold) {
-                String amount = Text.money(total, symbol);
-                String payer = safe(event.counterpartyName());
-                String receiver = safe(event.playerName());
-                String detail = amount + " moved " + payer + " -> " + receiver + " within " + windowMinutes
-                        + "m (possible collusion)";
-                String[] values = {"amount", amount, "payer", payer, "receiver", receiver,
-                        "minutes", String.valueOf(windowMinutes)};
-                raise(event.player(), event.playerName(), "collusion", "Received: " + detail,
-                        messages.get("reasons.collusion-received", values));
-                raise(event.counterparty(), event.counterpartyName(), "collusion", "Sent: " + detail,
-                        messages.get("reasons.collusion-sent", values));
+                raiseCollusion(event, total, windowMinutes, symbol);
+            } else if (threshold > 0) {
+                acrossServers(event.player(), event.counterparty(), "collusion", now - windowMinutes * 60L, threshold,
+                        sum -> raiseCollusion(event, sum, windowMinutes, symbol));
             }
+        }
+    }
+
+    private void raiseVelocity(MoneyEvent event, double total, long windowMinutes, String symbol) {
+        String amount = Text.money(total, symbol);
+        raise(event.player(), event.playerName(), "velocity",
+                "New account gained " + amount + " within " + windowMinutes + "m",
+                messages.get("reasons.velocity", "amount", amount, "minutes", String.valueOf(windowMinutes)));
+    }
+
+    private void raiseCollusion(MoneyEvent event, double total, long windowMinutes, String symbol) {
+        String amount = Text.money(total, symbol);
+        String payer = safe(event.counterpartyName());
+        String receiver = safe(event.playerName());
+        String detail = amount + " moved " + payer + " -> " + receiver + " within " + windowMinutes
+                + "m (possible collusion)";
+        String[] values = {"amount", amount, "payer", payer, "receiver", receiver,
+                "minutes", String.valueOf(windowMinutes)};
+        raise(event.player(), event.playerName(), "collusion", "Received: " + detail,
+                messages.get("reasons.collusion-received", values));
+        raise(event.counterparty(), event.counterpartyName(), "collusion", "Sent: " + detail,
+                messages.get("reasons.collusion-sent", values));
+    }
+
+    /**
+     * With servers sharing the database, this server's window misses money the player received on the
+     * others, so the shared ledger is totalled off the main thread and {@code over} runs back on it when
+     * the total reaches the threshold. Single-server storage has nothing more to count.
+     */
+    private void acrossServers(UUID receiver, UUID payer, String type, long since, double threshold,
+                               java.util.function.DoubleConsumer over) {
+        if (!ledger.shared() || ledger.isFlaggedFast(receiver, type)) {
+            return;
+        }
+        // one check per receiver (and payer) at a time; a payment arriving meanwhile is in the next one
+        String key = type + ":" + receiver + ":" + payer;
+        if (!checking.add(key)) {
+            return;
+        }
+        try {
+            checks.execute(() -> {
+                try {
+                    double total = ledger.receivedSince(receiver, payer, since);
+                    if (total >= threshold && plugin.isEnabled()) {
+                        plugin.getServer().getScheduler().runTask(plugin, () -> over.accept(total));
+                    }
+                } finally {
+                    checking.remove(key);
+                }
+            });
+        } catch (java.util.concurrent.RejectedExecutionException closed) {
+            checking.remove(key);
         }
     }
 
@@ -187,7 +266,8 @@ public final class AbuseMonitor {
         long now = clock.instant().getEpochSecond();
         plugin.getServer().getScheduler().runTaskAsynchronously(plugin, () -> {
             try {
-                if (ledger.saveFlag(new Flag(uuid, safeName, type, storedReason, now))) {
+                // a flag another server sharing the database already raised was announced there
+                if (ledger.saveFlag(new Flag(uuid, safeName, type, storedReason, now)) == Ledger.FlagSave.CREATED) {
                     plugin.getServer().getScheduler().runTask(plugin, () -> alerter.alert(
                             messages.get("alerts.flagged", "player", safeName, "reason", shownReason)));
                 }
