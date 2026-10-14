@@ -41,8 +41,9 @@ public final class Ledger {
 
     static final int SCHEMA_VERSION = 1;
     private static final String PRUNE_JOB = "prune";
-    // the prune runs once at startup; a server restarting within this window leaves it to the last pruner
+    // the prune runs at startup; other servers sharing the database that start within this window skip it
     private static final Duration PRUNE_LEASE = Duration.ofHours(6);
+    private static final int PRUNE_CHUNK = 1000;
 
     private static final int FLUSH_BATCH_CAP = 2000;
     private static final String SQLITE_FLAGS_DDL = """
@@ -61,8 +62,11 @@ public final class Ledger {
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """;
 
-    private record Queued(MoneyEvent event, long time) {
+    private record Queued(MoneyEvent event, long time, int attempts) {
     }
+
+    // a batch that failed this many times is dropped, so one bad row can't block the queue forever
+    private static final int FLUSH_ATTEMPTS = 3;
 
     private final JavaPlugin plugin;
     private final Queue<Queued> writeQueue = new ConcurrentLinkedQueue<>();
@@ -127,7 +131,10 @@ public final class Ledger {
                 hikari.setDataSourceProperties(SqliteSettings.properties());
             }
 
-            this.serverId = ServerId.resolve(storage.getString("server-id", ""), plugin.getDataFolder().toPath());
+            // only a shared database tells servers apart; SQLite needs no id
+            this.serverId = mysql()
+                    ? ServerId.resolve(storage.getString("server-id", ""), plugin.getDataFolder().toPath())
+                    : "local";
             this.dataSource = new HikariDataSource(hikari);
             this.db = new TxRunner(dataSource);
             migrate();
@@ -299,7 +306,7 @@ public final class Ledger {
 
     /** Enqueues an audit row. Thread-safe and non-blocking; the row is persisted by the next flush. */
     public void record(MoneyEvent event) {
-        writeQueue.add(new Queued(event, Instant.now().getEpochSecond()));
+        writeQueue.add(new Queued(event, Instant.now().getEpochSecond(), 0));
     }
 
     /** Batches queued audit rows on a pooled connection. Runs on a background thread (and on close). */
@@ -327,13 +334,26 @@ public final class Ledger {
                 connection.commit();
             } catch (SQLException exception) {
                 connection.rollback();
-                plugin.getLogger().warning("Could not flush " + batch.size() + " ledger rows: " + exception.getMessage());
+                requeue(batch, "Could not flush " + batch.size() + " ledger rows: " + exception.getMessage());
             } finally {
                 connection.setAutoCommit(previousAutoCommit);
             }
         } catch (SQLException exception) {
-            plugin.getLogger().warning("Ledger flush connection error: " + exception.getMessage());
+            requeue(batch, "Ledger flush connection error: " + exception.getMessage());
         }
+    }
+
+    // e.g. a lock wait while another server sharing the database prunes: the rows go out with a later flush
+    private void requeue(List<Queued> batch, String problem) {
+        int kept = 0;
+        for (Queued row : batch) {
+            if (row.attempts() + 1 < FLUSH_ATTEMPTS) {
+                writeQueue.add(new Queued(row.event(), row.time(), row.attempts() + 1));
+                kept++;
+            }
+        }
+        plugin.getLogger().warning(problem + (kept == batch.size() ? "; retrying them."
+                : "; " + (batch.size() - kept) + " of them were dropped after " + FLUSH_ATTEMPTS + " tries."));
     }
 
     private void bindInsert(PreparedStatement statement, MoneyEvent event, long createdAt) throws SQLException {
@@ -462,6 +482,9 @@ public final class Ledger {
      * the database: call it off the main thread.
      */
     public double receivedSince(UUID receiver, UUID payer, long sinceEpochSecond) {
+        if (dataSource == null) {
+            return 0.0;                          // closed while a check was in flight
+        }
         flush();
         String sql = "SELECT COALESCE(SUM(amount), 0) FROM ledger WHERE uuid = ? AND incoming = 1 AND created_at >= ?"
                 + (payer == null ? "" : " AND counterparty = ?");
@@ -668,24 +691,44 @@ public final class Ledger {
             return 0;
         }
         flush();
-        String sql = """
-                DELETE FROM ledger
-                WHERE id NOT IN (
-                    SELECT id FROM (
-                        SELECT id, ROW_NUMBER() OVER (PARTITION BY uuid ORDER BY created_at DESC, id DESC) AS rn
-                        FROM ledger
-                    ) ranked
-                    WHERE ranked.rn <= ?
-                )
+        // The ids are found with a plain read, which locks nothing, then deleted a chunk at a time, so
+        // other servers' inserts only ever wait for one small delete.
+        String select = """
+                SELECT id FROM (
+                    SELECT id, ROW_NUMBER() OVER (PARTITION BY uuid ORDER BY created_at DESC, id DESC) AS rn
+                    FROM ledger
+                ) ranked
+                WHERE ranked.rn > ?
                 """;
+        List<Long> doomed = new ArrayList<>();
         try (Connection connection = dataSource.getConnection();
-             PreparedStatement statement = connection.prepareStatement(sql)) {
+             PreparedStatement statement = connection.prepareStatement(select)) {
             statement.setInt(1, maxPerPlayer);
-            return statement.executeUpdate();
+            try (ResultSet rs = statement.executeQuery()) {
+                while (rs.next()) {
+                    doomed.add(rs.getLong(1));
+                }
+            }
         } catch (SQLException exception) {
             plugin.getLogger().warning("Could not prune ledger: " + exception.getMessage());
             return 0;
         }
+        int removed = 0;
+        for (int from = 0; from < doomed.size(); from += PRUNE_CHUNK) {
+            List<Long> chunk = doomed.subList(from, Math.min(doomed.size(), from + PRUNE_CHUNK));
+            String delete = "DELETE FROM ledger WHERE id IN (" + String.join(",", java.util.Collections.nCopies(chunk.size(), "?")) + ")";
+            try (Connection connection = dataSource.getConnection();
+                 PreparedStatement statement = connection.prepareStatement(delete)) {
+                for (int i = 0; i < chunk.size(); i++) {
+                    statement.setLong(i + 1, chunk.get(i));
+                }
+                removed += statement.executeUpdate();
+            } catch (SQLException exception) {
+                plugin.getLogger().warning("Could not prune ledger: " + exception.getMessage());
+                break;
+            }
+        }
+        return removed;
     }
 
     // synchronized so it cannot interleave with a background flush().
@@ -699,13 +742,6 @@ public final class Ledger {
                  Statement statement = connection.createStatement()) {
                 statement.execute("PRAGMA wal_checkpoint(TRUNCATE)");
             } catch (SQLException ignored) {
-            }
-        }
-        if (mysql() && lease != null) {
-            try {
-                lease.release(PRUNE_JOB);
-            } catch (SQLException ignored) {
-                // the lease runs out on its own
             }
         }
         dataSource.close();

@@ -129,9 +129,27 @@ class SharedLedgerTest {
     @EnabledIfEnvironmentVariable(named = "EG_TEST_MYSQL_PORT", matches = "[0-9]+")
     void onMySqlServersStartingTogetherMigrateOnce() throws Exception {
         String database = freshDatabase();
+        java.util.concurrent.atomic.AtomicInteger migrations = new java.util.concurrent.atomic.AtomicInteger();
+        java.util.logging.Handler counter = new java.util.logging.Handler() {
+            @Override
+            public void publish(java.util.logging.LogRecord record) {
+                if (record.getMessage().contains("schema migrated")) {
+                    migrations.incrementAndGet();
+                }
+            }
+
+            @Override
+            public void flush() {
+            }
+
+            @Override
+            public void close() {
+            }
+        };
         List<Thread> threads = new ArrayList<>();
         for (int i = 0; i < 4; i++) {
             String id = "s" + i;
+            Logger.getLogger("econguard-test-" + id).addHandler(counter);
             threads.add(new Thread(() -> mysql(id, database)));
         }
         threads.forEach(Thread::start);
@@ -139,6 +157,7 @@ class SharedLedgerTest {
             t.join();
         }
         assertEquals(4, opened.size());
+        assertEquals(1, migrations.get(), "exactly one server ran the migration");
         try (Connection c = DriverManager.getConnection(mysqlUrl(database), user(), password());
              Statement st = c.createStatement();
              ResultSet rs = st.executeQuery("SELECT version FROM econguard_schema_version")) {

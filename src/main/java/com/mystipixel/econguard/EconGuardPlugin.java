@@ -72,6 +72,9 @@ public final class EconGuardPlugin extends JavaPlugin implements Listener {
         if (service != null) {
             getServer().getServicesManager().unregister(EconGuardAPI.class, service);
         }
+        if (monitor != null) {
+            monitor.close();
+        }
         if (ledger != null) {
             ledger.close();
         }

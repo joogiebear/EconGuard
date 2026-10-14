@@ -74,6 +74,7 @@ class AbuseMonitorTest {
         when(plugin.getConfig()).thenReturn(config);
         when(plugin.getDataFolder()).thenReturn(folder.toFile());
         when(plugin.getLogger()).thenReturn(Logger.getLogger("test"));
+        when(plugin.isEnabled()).thenReturn(true);
         Server server = mock(Server.class);
         scheduler = mock(BukkitScheduler.class);
         when(plugin.getServer()).thenReturn(server);

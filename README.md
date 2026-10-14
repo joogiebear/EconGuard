@@ -226,10 +226,14 @@ Point every server at the same MySQL/MariaDB database and they share one ledger 
 - **A flag is announced once**, in chat and on Discord, by the server that raised it first. Staff on
   the other servers see it in `/econguard flags` and in the count shown when they join.
 - **Detection counts payments from every server.** The velocity and collusion totals read the shared
-  ledger, so money split across servers adds up. This happens off the main thread and lands a moment
-  after the payment that crosses the line.
+  ledger, so money split across servers adds up. Each server writes its payments to the database
+  about once a second, so two payments on two servers within a second of each other are counted
+  together at the next payment, not at once.
 - **Servers that start together take turns migrating the schema** (`econguard_schema_version`), and
-  only one prunes the ledger at startup (`econguard_lease`).
+  the ledger is pruned by one server at most every six hours (`econguard_lease`), in small batches so
+  other servers' writes don't wait on it.
+- **Upgrade one server first** when an old MySQL ledger is still latin1: its one-time conversion to
+  utf8mb4 copies the table, and other servers give up waiting for it after two minutes.
 - **Give each server its own `server-id`**, or leave it empty and each server keeps a generated one in
   `server-id.txt`. Copying that file to another server makes them look like one server.
 - **Keep the servers' clocks in sync** (NTP). Ledger times come from the server that recorded them.

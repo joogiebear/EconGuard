@@ -56,16 +56,50 @@ public final class AbuseMonitor {
 
     private final Clock clock;
 
+    // Cross-server window checks: a few threads and a bounded queue, so a burst of payments can't start a
+    // thread or a query each. A check dropped when the queue is full runs again with the next payment.
+    private final java.util.concurrent.Executor checks;
+    private final Set<String> checking = ConcurrentHashMap.newKeySet();
+
     public AbuseMonitor(JavaPlugin plugin, Ledger ledger, Alerter alerter, MessageManager messages) {
-        this(plugin, ledger, alerter, messages, Clock.systemUTC());
+        this(plugin, ledger, alerter, messages, Clock.systemUTC(), checkPool());
     }
 
+    // tests: checks run inline
     AbuseMonitor(JavaPlugin plugin, Ledger ledger, Alerter alerter, MessageManager messages, Clock clock) {
+        this(plugin, ledger, alerter, messages, clock, Runnable::run);
+    }
+
+    AbuseMonitor(JavaPlugin plugin, Ledger ledger, Alerter alerter, MessageManager messages, Clock clock,
+                 java.util.concurrent.Executor checks) {
         this.plugin = plugin;
         this.ledger = ledger;
         this.alerter = alerter;
         this.messages = messages;
         this.clock = clock;
+        this.checks = checks;
+    }
+
+    private static java.util.concurrent.ThreadPoolExecutor checkPool() {
+        java.util.concurrent.ThreadPoolExecutor pool = new java.util.concurrent.ThreadPoolExecutor(2, 2,
+                30L, java.util.concurrent.TimeUnit.SECONDS, new java.util.concurrent.ArrayBlockingQueue<>(256),
+                runnable -> {
+                    Thread thread = new Thread(runnable, "EconGuard-window-check");
+                    thread.setDaemon(true);
+                    return thread;
+                },
+                (dropped, executor) -> {
+                    throw new java.util.concurrent.RejectedExecutionException("window checks are busy");
+                });
+        pool.allowCoreThreadTimeOut(true);
+        return pool;
+    }
+
+    /** Stops the cross-server checks. Call on disable. */
+    public void close() {
+        if (checks instanceof java.util.concurrent.ExecutorService pool) {
+            pool.shutdownNow();
+        }
     }
 
     public void analyze(MoneyEvent event) {
@@ -156,12 +190,25 @@ public final class AbuseMonitor {
         if (!ledger.shared() || ledger.isFlaggedFast(receiver, type)) {
             return;
         }
-        plugin.getServer().getScheduler().runTaskAsynchronously(plugin, () -> {
-            double total = ledger.receivedSince(receiver, payer, since);
-            if (total >= threshold) {
-                plugin.getServer().getScheduler().runTask(plugin, () -> over.accept(total));
-            }
-        });
+        // one check per receiver (and payer) at a time; a payment arriving meanwhile is in the next one
+        String key = type + ":" + receiver + ":" + payer;
+        if (!checking.add(key)) {
+            return;
+        }
+        try {
+            checks.execute(() -> {
+                try {
+                    double total = ledger.receivedSince(receiver, payer, since);
+                    if (total >= threshold && plugin.isEnabled()) {
+                        plugin.getServer().getScheduler().runTask(plugin, () -> over.accept(total));
+                    }
+                } finally {
+                    checking.remove(key);
+                }
+            });
+        } catch (java.util.concurrent.RejectedExecutionException closed) {
+            checking.remove(key);
+        }
     }
 
     /** Drops windows whose samples have all aged out; pair windows would otherwise grow without bound. */
