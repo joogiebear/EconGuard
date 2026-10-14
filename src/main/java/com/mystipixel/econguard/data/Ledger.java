@@ -25,6 +25,7 @@ import java.util.Locale;
 import java.util.Queue;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.logging.Level;
 
 /**
@@ -70,6 +71,7 @@ public final class Ledger {
 
     private final JavaPlugin plugin;
     private final Queue<Queued> writeQueue = new ConcurrentLinkedQueue<>();
+    private final ReentrantLock flushLock = new ReentrantLock();
 
     // mirror of the flags table, so allowTrade is an O(1) lookup instead of a query inside another
     // plugin's transaction
@@ -309,8 +311,35 @@ public final class Ledger {
         writeQueue.add(new Queued(event, Instant.now().getEpochSecond(), 0));
     }
 
-    /** Batches queued audit rows on a pooled connection. Runs on a background thread (and on close). */
-    public synchronized void flush() {
+    /**
+     * Batches queued audit rows on a pooled connection. Runs on a background timer; while a flush is still
+     * running (a slow or locked database) the next one returns at once instead of queueing up a thread.
+     */
+    public void flush() {
+        if (!flushLock.tryLock()) {
+            return;
+        }
+        try {
+            flushQueued();
+        } finally {
+            flushLock.unlock();
+        }
+    }
+
+    // Before a read: waits for rows queued or still being written, so the read sees them.
+    private void flushBeforeRead() {
+        if (writeQueue.isEmpty() && !flushLock.isLocked()) {
+            return;
+        }
+        flushLock.lock();
+        try {
+            flushQueued();
+        } finally {
+            flushLock.unlock();
+        }
+    }
+
+    private void flushQueued() {
         if (dataSource == null) {
             return;
         }
@@ -376,7 +405,7 @@ public final class Ledger {
     }
 
     public List<MoneyEvent> recent(UUID uuid, int limit) {
-        flush(); // ensure just-enqueued rows are visible to history queries
+        flushBeforeRead(); // ensure just-enqueued rows are visible to history queries
         String sql = """
                 SELECT uuid, username, source, action, amount, incoming, counterparty, counterparty_name,
                        item, balance_after, note
@@ -418,7 +447,7 @@ public final class Ledger {
 
     /** The most recent ledger rows between two specific players, in either direction, newest first. */
     public List<MoneyEvent> pairRecent(UUID a, UUID b, int limit) {
-        flush();
+        flushBeforeRead();
         String sql = """
                 SELECT uuid, username, source, action, amount, incoming, counterparty, counterparty_name,
                        item, balance_after, note
@@ -450,7 +479,7 @@ public final class Ledger {
      * the incoming rows. Two entries at most; a player who never received anything is simply absent.
      */
     public java.util.Map<UUID, double[]> pairTotals(UUID a, UUID b) {
-        flush();
+        flushBeforeRead();
         String sql = """
                 SELECT uuid, COUNT(*) c, SUM(amount) s
                 FROM ledger
@@ -485,7 +514,7 @@ public final class Ledger {
         if (dataSource == null) {
             return 0.0;                          // closed while a check was in flight
         }
-        flush();
+        flushBeforeRead();
         String sql = "SELECT COALESCE(SUM(amount), 0) FROM ledger WHERE uuid = ? AND incoming = 1 AND created_at >= ?"
                 + (payer == null ? "" : " AND counterparty = ?");
         try (Connection connection = dataSource.getConnection();
@@ -505,7 +534,7 @@ public final class Ledger {
     }
 
     public long countLedger() {
-        flush();
+        flushBeforeRead();
         try (Connection connection = dataSource.getConnection();
              Statement statement = connection.createStatement();
              ResultSet rs = statement.executeQuery("SELECT COUNT(*) FROM ledger")) {
@@ -690,7 +719,7 @@ public final class Ledger {
                     + exception.getMessage());
             return 0;
         }
-        flush();
+        flushBeforeRead();
         // The ids are found with a plain read, which locks nothing, then deleted a chunk at a time, so
         // other servers' inserts only ever wait for one small delete.
         String select = """
@@ -731,9 +760,18 @@ public final class Ledger {
         return removed;
     }
 
-    // synchronized so it cannot interleave with a background flush().
-    public synchronized void close() {
-        flush();
+    // holds the flush lock so it cannot interleave with a background flush()
+    public void close() {
+        flushLock.lock();
+        try {
+            closeLocked();
+        } finally {
+            flushLock.unlock();
+        }
+    }
+
+    private void closeLocked() {
+        flushQueued();
         if (dataSource == null) {
             return;
         }
