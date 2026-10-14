@@ -103,10 +103,10 @@ public final class AbuseMonitor {
             Deque<Sample> window = velocityWindows.computeIfAbsent(event.player(), k -> new ArrayDeque<>());
             double total = windowSum(window, now, windowMinutes * 60L, event.amount());
             if (threshold > 0 && total >= threshold) {
-                String amount = Text.money(total, symbol);
-                raise(event.player(), event.playerName(), "velocity",
-                        "New account gained " + amount + " within " + windowMinutes + "m",
-                        messages.get("reasons.velocity", "amount", amount, "minutes", String.valueOf(windowMinutes)));
+                raiseVelocity(event, total, windowMinutes, symbol);
+            } else if (threshold > 0) {
+                acrossServers(event.player(), null, "velocity", now - windowMinutes * 60L, threshold,
+                        sum -> raiseVelocity(event, sum, windowMinutes, symbol));
             }
         }
 
@@ -117,19 +117,51 @@ public final class AbuseMonitor {
             Deque<Sample> window = pairWindows.computeIfAbsent(key, k -> new ArrayDeque<>());
             double total = windowSum(window, now, windowMinutes * 60L, event.amount());
             if (threshold > 0 && total >= threshold) {
-                String amount = Text.money(total, symbol);
-                String payer = safe(event.counterpartyName());
-                String receiver = safe(event.playerName());
-                String detail = amount + " moved " + payer + " -> " + receiver + " within " + windowMinutes
-                        + "m (possible collusion)";
-                String[] values = {"amount", amount, "payer", payer, "receiver", receiver,
-                        "minutes", String.valueOf(windowMinutes)};
-                raise(event.player(), event.playerName(), "collusion", "Received: " + detail,
-                        messages.get("reasons.collusion-received", values));
-                raise(event.counterparty(), event.counterpartyName(), "collusion", "Sent: " + detail,
-                        messages.get("reasons.collusion-sent", values));
+                raiseCollusion(event, total, windowMinutes, symbol);
+            } else if (threshold > 0) {
+                acrossServers(event.player(), event.counterparty(), "collusion", now - windowMinutes * 60L, threshold,
+                        sum -> raiseCollusion(event, sum, windowMinutes, symbol));
             }
         }
+    }
+
+    private void raiseVelocity(MoneyEvent event, double total, long windowMinutes, String symbol) {
+        String amount = Text.money(total, symbol);
+        raise(event.player(), event.playerName(), "velocity",
+                "New account gained " + amount + " within " + windowMinutes + "m",
+                messages.get("reasons.velocity", "amount", amount, "minutes", String.valueOf(windowMinutes)));
+    }
+
+    private void raiseCollusion(MoneyEvent event, double total, long windowMinutes, String symbol) {
+        String amount = Text.money(total, symbol);
+        String payer = safe(event.counterpartyName());
+        String receiver = safe(event.playerName());
+        String detail = amount + " moved " + payer + " -> " + receiver + " within " + windowMinutes
+                + "m (possible collusion)";
+        String[] values = {"amount", amount, "payer", payer, "receiver", receiver,
+                "minutes", String.valueOf(windowMinutes)};
+        raise(event.player(), event.playerName(), "collusion", "Received: " + detail,
+                messages.get("reasons.collusion-received", values));
+        raise(event.counterparty(), event.counterpartyName(), "collusion", "Sent: " + detail,
+                messages.get("reasons.collusion-sent", values));
+    }
+
+    /**
+     * With servers sharing the database, this server's window misses money the player received on the
+     * others, so the shared ledger is totalled off the main thread and {@code over} runs back on it when
+     * the total reaches the threshold. Single-server storage has nothing more to count.
+     */
+    private void acrossServers(UUID receiver, UUID payer, String type, long since, double threshold,
+                               java.util.function.DoubleConsumer over) {
+        if (!ledger.shared() || ledger.isFlaggedFast(receiver, type)) {
+            return;
+        }
+        plugin.getServer().getScheduler().runTaskAsynchronously(plugin, () -> {
+            double total = ledger.receivedSince(receiver, payer, since);
+            if (total >= threshold) {
+                plugin.getServer().getScheduler().runTask(plugin, () -> over.accept(total));
+            }
+        });
     }
 
     /** Drops windows whose samples have all aged out; pair windows would otherwise grow without bound. */
@@ -187,7 +219,8 @@ public final class AbuseMonitor {
         long now = clock.instant().getEpochSecond();
         plugin.getServer().getScheduler().runTaskAsynchronously(plugin, () -> {
             try {
-                if (ledger.saveFlag(new Flag(uuid, safeName, type, storedReason, now))) {
+                // a flag another server sharing the database already raised was announced there
+                if (ledger.saveFlag(new Flag(uuid, safeName, type, storedReason, now)) == Ledger.FlagSave.CREATED) {
                     plugin.getServer().getScheduler().runTask(plugin, () -> alerter.alert(
                             messages.get("alerts.flagged", "player", safeName, "reason", shownReason)));
                 }

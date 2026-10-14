@@ -91,8 +91,13 @@ currency-symbol: "$"        # formatting for alerts only
 notify-staff: true          # ping online econguard.alerts holders
 discord-webhook: ""         # optional; blank = off
 
+storage:
+  type: SQLITE              # or MYSQL (fill in the mysql block in config.yml)
+  sqlite-file: "econguard.db"
+  refresh-seconds: 5        # MySQL: how often flags from other servers are picked up
+  server-id: ""             # MySQL: this server's name; empty generates one
+
 database:
-  file: "econguard.db"
   max-rows-per-player: 500  # pruned on startup. 0 = unlimited
 
 # "Young account" definition — see below. Either condition qualifies.
@@ -208,9 +213,26 @@ Add it as a `provided` dependency and `softdepend: [EconGuard]` in your `plugin.
 SQLite (`econguard.db`). Two tables: the money ledger and the flag list. Writes are async; the ledger
 is pruned to `max-rows-per-player` on startup so it can't grow unbounded on a long-lived server.
 
-MySQL is supported, but each server needs its own database for now. Sharing one database between
-servers (a hub and island servers, say) is planned and not safe yet, because two servers can overwrite
-each other's data.
+MySQL is supported too, for one server or for several.
+
+### Several servers, one ledger
+
+Point every server at the same MySQL/MariaDB database and they share one ledger and one set of flags:
+`/econguard history` shows a player's payments from every server.
+
+- **Flags reach every server.** Each server re-reads the flags every `refresh-seconds`, so a player
+  flagged on one server is refused on the others (with `block-flagged-trades`) within that time, and
+  clearing a flag clears it everywhere.
+- **A flag is announced once**, in chat and on Discord, by the server that raised it first. Staff on
+  the other servers see it in `/econguard flags` and in the count shown when they join.
+- **Detection counts payments from every server.** The velocity and collusion totals read the shared
+  ledger, so money split across servers adds up. This happens off the main thread and lands a moment
+  after the payment that crosses the line.
+- **Servers that start together take turns migrating the schema** (`econguard_schema_version`), and
+  only one prunes the ledger at startup (`econguard_lease`).
+- **Give each server its own `server-id`**, or leave it empty and each server keeps a generated one in
+  `server-id.txt`. Copying that file to another server makes them look like one server.
+- **Keep the servers' clocks in sync** (NTP). Ledger times come from the server that recorded them.
 
 ## Building
 

@@ -48,6 +48,11 @@ public final class EconGuardPlugin extends JavaPlugin implements Listener {
 
         getServer().getScheduler().runTaskTimerAsynchronously(this, ledger::flush, 20L, 20L);
         getServer().getScheduler().runTaskTimer(this, monitor::sweep, 6000L, 6000L);
+        if (ledger.shared()) {
+            // flags raised or cleared on other servers sharing the database reach this server's trade checks
+            long refreshTicks = Math.max(1L, getConfig().getLong("storage.refresh-seconds", 5L)) * 20L;
+            getServer().getScheduler().runTaskTimerAsynchronously(this, ledger::refreshFlags, refreshTicks, refreshTicks);
+        }
 
         PluginCommand command = getCommand("econguard");
         if (command != null) {

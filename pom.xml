@@ -22,6 +22,10 @@
             <id>papermc</id>
             <url>https://repo.papermc.io/repository/maven-public/</url>
         </repository>
+        <repository>
+            <id>royal-common</id>
+            <url>https://raw.githubusercontent.com/joogiebear/royal-common/maven</url>
+        </repository>
     </repositories>
 
     <dependencies>
@@ -62,6 +66,12 @@
             <artifactId>mockito-core</artifactId>
             <version>5.23.0</version>
             <scope>test</scope>
+        </dependency>
+        <!-- royal-common is shaded (relocated) too: shared-database helpers used across the Royal suite. -->
+        <dependency>
+            <groupId>com.github.joogiebear</groupId>
+            <artifactId>royal-common</artifactId>
+            <version>2026.42.0</version>
         </dependency>
         <!-- bStats is shaded (relocated) into the jar; it is not a library-loader artifact. -->
         <dependency>
@@ -111,6 +121,10 @@
                                 <relocation>
                                     <pattern>org.bstats</pattern>
                                     <shadedPattern>com.mystipixel.econguard.libs.bstats</shadedPattern>
+                                </relocation>
+                                <relocation>
+                                    <pattern>com.mystipixel.royalcommon</pattern>
+                                    <shadedPattern>com.mystipixel.econguard.libs.royalcommon</shadedPattern>
                                 </relocation>
                             </relocations>
                         </configuration>

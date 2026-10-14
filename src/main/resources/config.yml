@@ -10,11 +10,15 @@ notify-staff: true
 # Optional Discord webhook for alerts and flags. Leave blank to disable.
 discord-webhook: ""
 
-# Storage backend: SQLITE (default) or MYSQL. Each server needs its own database for now: sharing one
-# between servers is planned but not safe yet, because servers can overwrite each other's data.
+# Storage backend: SQLITE (default) or MYSQL. Several servers may share one MySQL database: they then share
+# one ledger and one set of flags (see "Several servers, one ledger" in the README).
 storage:
   type: SQLITE
   sqlite-file: "econguard.db"
+  # MySQL only: how often flags raised or cleared on other servers are picked up, in seconds.
+  refresh-seconds: 5
+  # This server's name when sharing a MySQL database. Leave empty to generate one, kept in server-id.txt.
+  server-id: ""
   mysql:
     host: localhost
     port: 3306
