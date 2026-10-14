@@ -98,7 +98,7 @@ storage:
   server-id: ""             # MySQL: this server's name; empty generates one
 
 database:
-  max-rows-per-player: 500  # pruned on startup. 0 = unlimited
+  max-rows-per-player: 500  # pruned on startup and daily. 0 = unlimited
 
 # "Young account" definition — see below. Either condition qualifies.
 young-account:
@@ -211,7 +211,7 @@ Add it as a `provided` dependency and `softdepend: [EconGuard]` in your `plugin.
 ## Storage
 
 SQLite (`econguard.db`). Two tables: the money ledger and the flag list. Writes are async; the ledger
-is pruned to `max-rows-per-player` on startup so it can't grow unbounded on a long-lived server.
+is pruned to `max-rows-per-player` on startup and once a day so it can't grow unbounded on a long-lived server.
 
 MySQL is supported too, for one server or for several.
 

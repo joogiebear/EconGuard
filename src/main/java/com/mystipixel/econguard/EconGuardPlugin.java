@@ -107,12 +107,13 @@ public final class EconGuardPlugin extends JavaPlugin implements Listener {
         if (maxPerPlayer <= 0) {
             return;
         }
-        getServer().getScheduler().runTaskAsynchronously(this, () -> {
+        // at startup, then daily: the ledger keeps growing between restarts
+        getServer().getScheduler().runTaskTimerAsynchronously(this, () -> {
             int removed = ledger.prune(maxPerPlayer);
             if (removed > 0) {
                 getLogger().info("Pruned " + removed + " old ledger rows (keeping newest " + maxPerPlayer + " per player).");
             }
-        });
+        }, 1L, 20L * 60L * 60L * 24L);
     }
     // owners opt out globally in plugins/bStats/config.yml
     private void setupMetrics() {

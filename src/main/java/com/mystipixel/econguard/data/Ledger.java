@@ -42,9 +42,11 @@ public final class Ledger {
 
     static final int SCHEMA_VERSION = 1;
     private static final String PRUNE_JOB = "prune";
-    // the prune runs at startup; other servers sharing the database that start within this window skip it
-    private static final Duration PRUNE_LEASE = Duration.ofHours(6);
+    // longer than the daily period, so the server that pruned last keeps the job; another takes it over a day
+    // after that server stops
+    private static final Duration PRUNE_LEASE = Duration.ofHours(25);
     private static final int PRUNE_CHUNK = 1000;
+    private static final long PRUNE_OVERLAP_SECONDS = 3600;
 
     private static final int FLUSH_BATCH_CAP = 2000;
     private static final String SQLITE_FLAGS_DDL = """
@@ -85,6 +87,8 @@ public final class Ledger {
     private TxRunner db;
     private Lease lease;
     private String serverId;
+    // epoch second the last prune pass covered from; 0 until the first (full) pass
+    private volatile long prunedSince;
 
     public Ledger(JavaPlugin plugin) {
         this.plugin = plugin;
@@ -704,12 +708,15 @@ public final class Ledger {
         }
     }
 
-    /** Prunes old ledger rows beyond the per-player cap. The window function runs on SQLite 3.25+/MySQL 8+. */
+    /**
+     * Prunes old ledger rows beyond the per-player cap. The first pass covers every player; later passes
+     * only players with rows since the previous pass, since nobody else can have gone over the cap.
+     */
     public int prune(int maxPerPlayer) {
         if (maxPerPlayer <= 0) {
             return 0;
         }
-        // servers sharing the database take turns: the first to start prunes, the rest skip until its lease ends
+        // servers sharing the database take turns: the holder keeps the daily job until it stops
         try {
             if (mysql() && !lease.tryAcquireOrRenew(PRUNE_JOB, PRUNE_LEASE)) {
                 return 0;
@@ -720,22 +727,22 @@ public final class Ledger {
             return 0;
         }
         flushBeforeRead();
-        // The ids are found with a plain read, which locks nothing, then deleted a chunk at a time, so
-        // other servers' inserts only ever wait for one small delete.
-        String select = """
-                SELECT id FROM (
-                    SELECT id, ROW_NUMBER() OVER (PARTITION BY uuid ORDER BY created_at DESC, id DESC) AS rn
-                    FROM ledger
-                ) ranked
-                WHERE ranked.rn > ?
-                """;
-        List<Long> doomed = new ArrayList<>();
+        // rows carry the time they were recorded, which a retried flush can insert a little later
+        long passStart = Instant.now().getEpochSecond() - PRUNE_OVERLAP_SECONDS;
+        String select = prunedSince == 0
+                ? "SELECT uuid FROM ledger GROUP BY uuid HAVING COUNT(*) > ?"
+                : "SELECT DISTINCT uuid FROM ledger WHERE created_at >= ?";
+        List<String> players = new ArrayList<>();
         try (Connection connection = dataSource.getConnection();
              PreparedStatement statement = connection.prepareStatement(select)) {
-            statement.setInt(1, maxPerPlayer);
+            if (prunedSince == 0) {
+                statement.setInt(1, maxPerPlayer);
+            } else {
+                statement.setLong(1, prunedSince);
+            }
             try (ResultSet rs = statement.executeQuery()) {
                 while (rs.next()) {
-                    doomed.add(rs.getLong(1));
+                    players.add(rs.getString(1));
                 }
             }
         } catch (SQLException exception) {
@@ -743,21 +750,67 @@ public final class Ledger {
             return 0;
         }
         int removed = 0;
-        for (int from = 0; from < doomed.size(); from += PRUNE_CHUNK) {
-            List<Long> chunk = doomed.subList(from, Math.min(doomed.size(), from + PRUNE_CHUNK));
-            String delete = "DELETE FROM ledger WHERE id IN (" + String.join(",", java.util.Collections.nCopies(chunk.size(), "?")) + ")";
-            try (Connection connection = dataSource.getConnection();
-                 PreparedStatement statement = connection.prepareStatement(delete)) {
-                for (int i = 0; i < chunk.size(); i++) {
-                    statement.setLong(i + 1, chunk.get(i));
+        try {
+            for (String player : players) {
+                removed += prunePlayer(player, maxPerPlayer);
+            }
+        } catch (SQLException exception) {
+            plugin.getLogger().warning("Could not prune ledger: " + exception.getMessage());
+            return removed;
+        }
+        prunedSince = passStart;
+        return removed;
+    }
+
+    // Deletes a chunk at a time, so other servers' inserts only ever wait for one small delete.
+    private int prunePlayer(String player, int keep) throws SQLException {
+        long oldestKept;
+        long oldestKeptId;
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement statement = connection.prepareStatement(
+                     "SELECT created_at, id FROM ledger WHERE uuid = ? ORDER BY created_at DESC, id DESC LIMIT 1 OFFSET ?")) {
+            statement.setString(1, player);
+            statement.setInt(2, keep - 1);
+            try (ResultSet rs = statement.executeQuery()) {
+                if (!rs.next()) {
+                    return 0;
                 }
-                removed += statement.executeUpdate();
-            } catch (SQLException exception) {
-                plugin.getLogger().warning("Could not prune ledger: " + exception.getMessage());
-                break;
+                oldestKept = rs.getLong(1);
+                oldestKeptId = rs.getLong(2);
             }
         }
-        return removed;
+        String select = "SELECT id FROM ledger WHERE uuid = ? AND (created_at < ? OR (created_at = ? AND id < ?)) LIMIT "
+                + PRUNE_CHUNK;
+        int removed = 0;
+        while (true) {
+            List<Long> doomed = new ArrayList<>();
+            try (Connection connection = dataSource.getConnection();
+                 PreparedStatement statement = connection.prepareStatement(select)) {
+                statement.setString(1, player);
+                statement.setLong(2, oldestKept);
+                statement.setLong(3, oldestKept);
+                statement.setLong(4, oldestKeptId);
+                try (ResultSet rs = statement.executeQuery()) {
+                    while (rs.next()) {
+                        doomed.add(rs.getLong(1));
+                    }
+                }
+            }
+            if (doomed.isEmpty()) {
+                return removed;
+            }
+            String delete = "DELETE FROM ledger WHERE id IN (" + String.join(",", java.util.Collections.nCopies(doomed.size(), "?")) + ")";
+            try (Connection connection = dataSource.getConnection();
+                 PreparedStatement statement = connection.prepareStatement(delete)) {
+                for (int i = 0; i < doomed.size(); i++) {
+                    statement.setLong(i + 1, doomed.get(i));
+                }
+                removed += statement.executeUpdate();
+            }
+            if (doomed.size() < PRUNE_CHUNK) {
+                return removed;
+            }
+        }
     }
 
     // holds the flush lock so it cannot interleave with a background flush()

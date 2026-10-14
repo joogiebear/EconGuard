@@ -29,7 +29,7 @@ storage:
     pool-size: 10
 
 database:
-  # Keep at most this many ledger rows per player (pruned on startup). 0 = unlimited.
+  # Keep at most this many ledger rows per player (pruned on startup and daily). 0 = unlimited.
   max-rows-per-player: 500
 
 # The velocity and young-incoming signals only flag young accounts, so veterans selling a lucky drop aren't flagged.
