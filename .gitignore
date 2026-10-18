@@ -2,17 +2,25 @@
 target/
 *.class
 *.jar
+dependency-reduced-pom.xml
 
 # IDE
 .idea/
 *.iml
 .vscode/
+.settings/
+.classpath
+.project
 
 # OS junk
 .DS_Store
 Thumbs.db
 
-# Local server runtime state (generated on the server, never committed)
+# Python caches from tools/ and release scripts
+__pycache__/
+
+# Logs and local server runtime state (generated on the server, never committed)
+*.log
 *.db
 *.db-shm
 *.db-wal
