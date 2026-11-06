@@ -24,3 +24,23 @@ __pycache__/
 *.db
 *.db-shm
 *.db-wal
+
+# Secrets
+.env
+.env.*
+!.env.example
+!.env.sample
+*.pem
+*.key
+# AI / agent tooling (kept local, not committed)
+/CLAUDE.md
+/CLAUDE.local.md
+/AGENTS.md
+/GEMINI.md
+/.claude/
+/.superpowers/
+/.cursor/
+/.cursorrules
+/.windsurfrules
+/.codex/
+/.aider*
